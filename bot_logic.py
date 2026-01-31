@@ -189,7 +189,8 @@ if __name__ == "__main__":
         send_telegram(TOKEN, CHAT_ID, final_report)
     else:
         # Opsi 2: Kalau mau kirim report per 4 jam walau WAIT, uncomment baris bawah ini:
-        # send_telegram(TOKEN, CHAT_ID, final_report) 
-        print("💤 Market Sideways (WAIT). Tidak kirim pesan.")
+        send_telegram(TOKEN, CHAT_ID, final_report) 
+        # print("💤 Market Sideways (WAIT). Tidak kirim pesan.")
     
+
     print("✅ Robot Selesai.")
