@@ -1,0 +1,29 @@
+name: Gold Automation
+
+on:
+  schedule:
+    # Jalan tiap 4 jam (00:00, 04:00, 08:00, dst UTC)
+    - cron: '0 */1 * * *'
+  workflow_dispatch: # Biar bisa diklik manual "Run Now" buat ngetes
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v2
+
+      - name: Setup Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'
+
+      - name: Install Libraries
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Gold Bot Logic
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python bot_logic.py
