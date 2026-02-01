@@ -27,7 +27,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- KONFIGURASI ENGINE ---
-TICKERS = ["GC=F", "PAXG-USD", "IDR=X"]
+# ✅ HAPUS GC=F. Cuma ambil PAXG dan KURS.
+TICKERS = ["PAXG-USD", "IDR=X"]
 INTERVAL = "1h"
 PERIOD = "1mo"
 SPREAD_AJAIB = 1.015 
@@ -41,11 +42,9 @@ def add_manual_indicators(df):
     df = df.copy()
     
     # 1. MACD (12, 26, 9)
-    # EMA Short & Long
     k = df['Close'].ewm(span=12, adjust=False, min_periods=12).mean()
     d = df['Close'].ewm(span=26, adjust=False, min_periods=26).mean()
     df['MACD'] = k - d
-    # Signal Line
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False, min_periods=9).mean()
     
     # 2. Bollinger Bands (20, 2)
@@ -55,40 +54,60 @@ def add_manual_indicators(df):
     df['BBL'] = df['SMA20'] - (df['STD20'] * 2) # Lower
     
     # 3. Stochastic RSI (14, 14, 3, 3)
-    # Hitung RSI Biasa Dulu
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # Hitung Stoch dari RSI
+    # Hitung Stoch
     min_rsi = df['RSI'].rolling(window=14).min()
     max_rsi = df['RSI'].rolling(window=14).max()
-    # Rumus Stoch K & D
     stoch_rsi = (df['RSI'] - min_rsi) / (max_rsi - min_rsi)
-    df['STOCHRSIk'] = stoch_rsi.rolling(window=3).mean() * 100 # Kali 100 biar skala 0-100
+    df['STOCHRSIk'] = stoch_rsi.rolling(window=3).mean() * 100
     df['STOCHRSId'] = df['STOCHRSIk'].rolling(window=3).mean()
     
     return df
 
-# --- FUNGSI GET DATA ---
+# --- FUNGSI GET DATA (REVISI: PAXG ONLY) ---
 @st.cache_data(ttl=300)
 def get_data_engine():
+    # Download cuma 2 Ticker (PAXG & IDR)
     df = yf.download(TICKERS, period=PERIOD, interval=INTERVAL, group_by='ticker', progress=False, threads=False)
+    
     try:
-        xau = df['GC=F'].dropna()
-        paxg = df['PAXG-USD'].dropna()
-        kurs_raw = df['IDR=X']['Close'].dropna()
+        # 1. Ambil Data PAXG
+        # Handle beda format yfinance (kadang return MultiIndex, kadang tidak)
+        if isinstance(df.columns, pd.MultiIndex):
+            paxg = df['PAXG-USD'].dropna()
+        else:
+            # Fallback kalau yfinance ngaco strukturnya
+            # Kita cari kolom yang ada bau-bau PAXG
+            paxg = df # Asumsi df cuma isi paxg kalau single ticker (jarang terjadi krn ada IDR)
+        
+        # 2. 🔥 JURUS CERMIN: XAU DIANGGAP SAMA DENGAN PAXG 🔥
+        # Ini bikin analisa teknikal lu 100% sinkron sama barang yang lu beli.
+        xau = paxg.copy() 
+        
+        # 3. Ambil Kurs IDR
+        if isinstance(df.columns, pd.MultiIndex):
+            kurs_raw = df['IDR=X']['Close'].dropna()
+        else:
+            # Fallback (biasanya jarang masuk sini kalau tickers > 1)
+             kurs_raw = pd.Series([16800])
+
         kurs = kurs_raw.iloc[-1] if not kurs_raw.empty else 16800
-    except:
-        xau = df.xs('GC=F', axis=1, level=0).dropna()
-        paxg = df.xs('PAXG-USD', axis=1, level=0).dropna()
-        kurs = 16800
+
+    except Exception as e:
+        st.error(f"Error Data Fetching: {e}")
+        # Data Darurat biar gak crash
+        return pd.DataFrame(), pd.DataFrame(), 16800
+        
     if kurs < 10000: kurs = 16800
     return xau, paxg, kurs
 
 def calculate_fibonacci_levels(df):
+    if df.empty: return {}
     high = df['High'].max()
     low = df['Low'].min()
     diff = high - low
@@ -112,10 +131,12 @@ def send_telegram_alert(token, chat_id, message):
 
 # --- LOGIC ANALYSIS & REPORT ---
 def generate_analysis_report(xau, paxg, kurs):
-    # >>> INI BEDANYA: Panggil fungsi manual, bukan pandas_ta <<<
+    if xau.empty: return "Data Kosong/Error", xau, {}, xau, paxg
+
+    # Analisa tetap pakai variabel 'xau', tapi isinya sekarang adalah data PAXG
     xau = add_manual_indicators(xau)
     
-    # VPVR Logic (Tetap pake pandas native)
+    # VPVR Logic
     price_bins = pd.cut(xau['Close'], bins=50)
     vpvr = xau.groupby(price_bins, observed=True)['Volume'].sum()
     poc = vpvr.idxmax().mid
@@ -126,7 +147,7 @@ def generate_analysis_report(xau, paxg, kurs):
     last_xau = xau.iloc[-1]
     last_paxg = paxg.iloc[-1]
     
-    # Ambil Data (Sekarang nama kolomnya sudah pasti, gak perlu search aneh-aneh)
+    # Indikator
     stoch_k = last_xau['STOCHRSIk']
     stoch_d = last_xau['STOCHRSId']
     
@@ -135,15 +156,15 @@ def generate_analysis_report(xau, paxg, kurs):
     elif stoch_k < 20: res_stoch = ("⚪ WAIT", "Oversold")
     else: res_stoch = ("⚪ NEUTRAL", f"{stoch_k:.1f}")
     
-    # MACD Logic
+    # MACD
     if last_xau['MACD'] > last_xau['MACD_Signal']: res_macd = ("🟢 BULLISH", "Trend Naik")
     else: res_macd = ("🔴 BEARISH", "Trend Turun")
     
-    # POC Logic
+    # VPVR
     if last_xau['Close'] > poc: res_vpvr = ("🟢 STRONG", "Above POC")
     else: res_vpvr = ("🔴 WEAK", "Below POC")
     
-    # BB Logic
+    # Bollinger
     if last_xau['Close'] <= last_xau['BBL']: res_bb = ("🟢 BUY ZONE", "Lower Band")
     elif last_xau['Close'] >= last_xau['BBU']: res_bb = ("🔴 SELL ZONE", "Upper Band")
     else: res_bb = ("⚪ INSIDE", "Normal")
@@ -160,6 +181,8 @@ def generate_analysis_report(xau, paxg, kurs):
     decision = "WAIT / HOLD"
     validation = "Market sideways."
     
+    # LOGIKA PENGAMBILAN KEPUTUSAN
+    # Karena XAU = PAXG, logikanya jadi lebih simpel dan akurat
     if (res_stoch[0] == "🟢 BULLISH") and (current_paxg_usd <= target_buy_usd + 10):
         decision = "🔵 BUY / LONG"
         validation = "✅ VALIDATED: Rebound Golden Pocket + Stoch Cross Up."
@@ -178,15 +201,14 @@ def generate_analysis_report(xau, paxg, kurs):
 📅 Waktu: {now.strftime('%d %b %Y | %H:%M WIB')}
 ============================================================
 
-💰 UPDATE HARGA & RANGE
+💰 UPDATE HARGA (SOURCE: PAXG REAL-TIME)
 💵 KURS USD/IDR : {fmt_idr(kurs)}
 ------------------------------------------------------------
-🏆 XAU/USD      : {fmt_usd(last_xau['Close'])}
-🏆 XAU/IDR Gram : {fmt_idr((last_xau['Close'] * kurs) / 31.1035)}
+💎 PAXG/USD      : {fmt_usd(current_paxg_usd)}
+💎 PAXG/IDR      : {fmt_idr(current_paxg_usd * kurs)}
+   *(Estimasi Ajaib +1.5%: {fmt_idr(current_paxg_usd * kurs * SPREAD_AJAIB)})*
 ------------------------------------------------------------
-💎 PAXG/USD     : {fmt_usd(current_paxg_usd)}
-💎 PAXG/IDR     : {fmt_idr(current_paxg_usd * kurs)} - {fmt_idr(current_paxg_usd * kurs * SPREAD_AJAIB)}
-   *(Range: Harga Wajar s.d. Estimasi App Ajaib +1.5%)*
+(Note: Analisa Teknikal 100% menggunakan grafik PAXG)
 
 📊 HASIL ANALISIS (5 METODE)
 1. Stoch RSI   [{res_stoch[0]}] : {res_stoch[1]}
@@ -200,16 +222,15 @@ def generate_analysis_report(xau, paxg, kurs):
 🔐 VALIDATED BY      : {validation}
 ============================================================
 
-🎯 MAPPING AREA TERDEKAT & SKENARIO
+🎯 MAPPING AREA TERDEKAT (PAXG)
 """
     levels_sorted = ["MOONBAG (1.618)", "RESISTANCE (High)", "GOLDEN POCKET (0.618)", "FLOOR (Low)"]
     for name in levels_sorted:
-        xau_val = xau_fib[name]
         paxg_val = paxg_fib[name]
         paxg_idr = paxg_val * kurs * SPREAD_AJAIB
         report += f"\n📍 LEVEL: {name}"
-        report += f"\n   • XAU : {fmt_usd(xau_val)}"
-        report += f"\n   • PAXG: {fmt_usd(paxg_val)} | {fmt_idr(paxg_idr)} (Est. Ajaib)"
+        report += f"\n   • USD : {fmt_usd(paxg_val)}"
+        report += f"\n   • IDR : {fmt_idr(paxg_idr)} (Est. Ajaib)"
         if "MOONBAG" in name: report += "\n   👉 [TARGET] TP 2 / Jual Semua."
         elif "RESISTANCE" in name: report += "\n   👉 [UJI NYALI] Tembus=Moonbag. Gagal=Turun."
         elif "GOLDEN POCKET" in name: report += "\n   👉 [BUY ZONE] Mantul=Buy. Jebol=Cut Loss."
@@ -221,59 +242,59 @@ def generate_analysis_report(xau, paxg, kurs):
 # --- HALAMAN UTAMA ---
 st.title("🦅 Gold Master Automation")
 
-with st.spinner("Sedang Menganalisis (Manual Calculation)..."):
+with st.spinner("Sedang Menganalisis PAXG Market..."):
     xau_data, paxg_data, kurs_val = get_data_engine()
-    final_report, xau_processed, xau_fib_levels, last_xau_row, last_paxg_row = generate_analysis_report(xau_data, paxg_data, kurs_val)
+    
+    if xau_data.empty:
+        st.error("Gagal mengambil data PAXG. Coba refresh atau cek koneksi yfinance.")
+    else:
+        final_report, xau_processed, xau_fib_levels, last_xau_row, last_paxg_row = generate_analysis_report(xau_data, paxg_data, kurs_val)
 
-# --- SIDEBAR ---
-st.sidebar.header("⚙️ Konfigurasi")
+        # --- SIDEBAR ---
+        st.sidebar.header("⚙️ Konfigurasi")
 
-if "TELEGRAM_TOKEN" in st.secrets:
-    bot_token = st.secrets["TELEGRAM_TOKEN"]
-    chat_id = st.secrets["TELEGRAM_CHAT_ID"]
-    st.sidebar.success("✅ Login via Secrets")
-else:
-    bot_token = st.sidebar.text_input("Bot Token", type="password")
-    chat_id = st.sidebar.text_input("Chat ID")
+        if "TELEGRAM_TOKEN" in st.secrets:
+            bot_token = st.secrets["TELEGRAM_TOKEN"]
+            chat_id = st.secrets["TELEGRAM_CHAT_ID"]
+            st.sidebar.success("✅ Login via Secrets")
+        else:
+            bot_token = st.sidebar.text_input("Bot Token", type="password")
+            chat_id = st.sidebar.text_input("Chat ID")
 
-st.sidebar.markdown("---")
-st.sidebar.header("💰 Live Price")
-st.sidebar.metric("Kurs USD/IDR", fmt_idr(kurs_val))
+        st.sidebar.markdown("---")
+        st.sidebar.header("💰 Live Price (PAXG)")
+        st.sidebar.metric("Kurs USD/IDR", fmt_idr(kurs_val))
 
-est_ajaib = last_paxg_row['Close'] * kurs_val * SPREAD_AJAIB
-st.sidebar.metric("PAXG/IDR (Ajaib)", fmt_idr(est_ajaib))
+        est_ajaib = last_paxg_row['Close'] * kurs_val * SPREAD_AJAIB
+        st.sidebar.metric("PAXG/IDR (Ajaib)", fmt_idr(est_ajaib))
 
-st.sidebar.markdown("---")
-st.sidebar.metric("XAU/USD (Spot)", fmt_usd(last_xau_row['Close']))
-xau_gram = (last_xau_row['Close'] * kurs_val) / 31.1035
-st.sidebar.metric("XAU/IDR (Gram)", fmt_idr(xau_gram))
+        st.sidebar.markdown("---")
+        st.sidebar.metric("PAXG/USD (Spot)", fmt_usd(last_paxg_row['Close']))
 
-# --- CHART ---
-st.subheader("📊 Chart XAU/USD + Fibonacci Levels")
-fig = go.Figure(data=[go.Candlestick(x=xau_processed.index,
-                open=xau_processed['Open'], high=xau_processed['High'],
-                low=xau_processed['Low'], close=xau_processed['Close'],
-                name='XAU/USD')])
-colors = {"MOONBAG": "lime", "RESISTANCE": "red", "GOLDEN POCKET": "gold", "FLOOR": "white"}
-for label, val in xau_fib_levels.items():
-    c = "gray"
-    for k, v in colors.items():
-        if k in label: c = v
-    fig.add_hline(y=val, line_dash="dash", line_color=c, 
-                  annotation_text=f"{label} : ${val:.2f}", 
-                  annotation_position="top right")
-fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
-st.plotly_chart(fig, use_container_width=True)
+        # --- CHART ---
+        st.subheader("📊 Chart PAXG/USD + Fibonacci Levels")
+        fig = go.Figure(data=[go.Candlestick(x=xau_processed.index,
+                        open=xau_processed['Open'], high=xau_processed['High'],
+                        low=xau_processed['Low'], close=xau_processed['Close'],
+                        name='PAXG/USD')])
+        colors = {"MOONBAG": "lime", "RESISTANCE": "red", "GOLDEN POCKET": "gold", "FLOOR": "white"}
+        for label, val in xau_fib_levels.items():
+            c = "gray"
+            for k, v in colors.items():
+                if k in label: c = v
+            fig.add_hline(y=val, line_dash="dash", line_color=c, 
+                          annotation_text=f"{label} : ${val:.2f}", 
+                          annotation_position="top right")
+        fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, use_container_width=True)
 
-# --- REPORT ---
-st.subheader("📋 Laporan Analisis Lengkap")
-col1, col2 = st.columns([1, 4])
-with col1:
-    if st.button("📩 Kirim ke Telegram"):
-        success, msg = send_telegram_alert(bot_token, chat_id, final_report)
-        if success: st.success("Terkirim!")
-        else: st.error(f"Gagal: {msg}")
+        # --- REPORT ---
+        st.subheader("📋 Laporan Analisis Lengkap")
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            if st.button("📩 Kirim ke Telegram"):
+                success, msg = send_telegram_alert(bot_token, chat_id, final_report)
+                if success: st.success("Terkirim!")
+                else: st.error(f"Gagal: {msg}")
 
-st.text_area("Output Logika:", value=final_report, height=600, label_visibility="collapsed")
-
-
+        st.text_area("Output Logika:", value=final_report, height=600, label_visibility="collapsed")
