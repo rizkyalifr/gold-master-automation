@@ -221,8 +221,9 @@ if __name__ == "__main__":
             send_telegram(TOKEN, CHAT_ID, final_report)
         else:
             # Opsi: Kalau mau tetap laporan tiap 4 jam walau sideways, uncomment baris bawah:
-            # send_telegram(TOKEN, CHAT_ID, final_report)
-            print("💤 Market Sideways (WAIT/HOLD). Tidak kirim laporan.")
+            send_telegram(TOKEN, CHAT_ID, final_report)
+            # print("💤 Market Sideways (WAIT/HOLD). Tidak kirim laporan.")
             
     except Exception as e:
         print(f"❌ Terjadi Error di Logic: {e}")
+
