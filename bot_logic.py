@@ -6,16 +6,18 @@ from datetime import datetime
 import pytz
 
 # --- KONFIGURASI ENGINE ---
-TICKERS = ["GC=F", "PAXG-USD", "IDR=X"]
+# ✅ HAPUS GC=F. Cuma ambil PAXG dan KURS.
+TICKERS = ["PAXG-USD", "IDR=X"]
 INTERVAL = "1h"
 PERIOD = "1mo"
 SPREAD_AJAIB = 1.015 
+CALIBRATION_FACTOR = 0.99048968 # Faktor kalibrasi manual dari user
 
 # --- HELPER FORMATTING ---
 def fmt_idr(val): return f"Rp {val:,.0f}".replace(",", ".")
 def fmt_usd(val): return f"${val:,.2f}"
 
-# --- FUNGSI INDIKATOR MANUAL (SAMA PERSIS DENGAN APP.PY) ---
+# --- FUNGSI INDIKATOR MANUAL (PENGGANTI PANDAS_TA) ---
 def add_manual_indicators(df):
     df = df.copy()
     
@@ -47,23 +49,40 @@ def add_manual_indicators(df):
     
     return df
 
-# --- FUNGSI GET DATA (TANPA CACHE STREAMLIT) ---
+# --- FUNGSI GET DATA (HEADLESS VERSION) ---
 def get_data_engine():
-    # Progress=False biar log bersih
+    # Download cuma 2 Ticker (PAXG & IDR)
     df = yf.download(TICKERS, period=PERIOD, interval=INTERVAL, group_by='ticker', progress=False, threads=False)
+    
     try:
-        xau = df['GC=F'].dropna()
-        paxg = df['PAXG-USD'].dropna()
-        kurs_raw = df['IDR=X']['Close'].dropna()
+        # 1. Ambil Data PAXG & Terapkan Kalibrasi
+        if isinstance(df.columns, pd.MultiIndex):
+            # Menggunakan Multiplier 0.99048968 sesuai request
+            paxg = df['PAXG-USD'].dropna() * CALIBRATION_FACTOR
+        else:
+            # Fallback untuk single index
+            paxg = df * CALIBRATION_FACTOR
+        
+        # 2. 🔥 JURUS CERMIN: XAU DIANGGAP SAMA DENGAN PAXG (YANG SUDAH DIKALIBRASI) 🔥
+        xau = paxg.copy() 
+        
+        # 3. Ambil Kurs IDR
+        if isinstance(df.columns, pd.MultiIndex):
+            kurs_raw = df['IDR=X']['Close'].dropna()
+        else:
+            kurs_raw = pd.Series([16800]) # Default fallback
+
         kurs = kurs_raw.iloc[-1] if not kurs_raw.empty else 16800
-    except:
-        xau = df.xs('GC=F', axis=1, level=0).dropna()
-        paxg = df.xs('PAXG-USD', axis=1, level=0).dropna()
-        kurs = 16800
+
+    except Exception as e:
+        print(f"❌ Error Data Fetching: {e}")
+        return pd.DataFrame(), pd.DataFrame(), 16800
+        
     if kurs < 10000: kurs = 16800
     return xau, paxg, kurs
 
 def calculate_fibonacci_levels(df):
+    if df.empty: return {}
     high = df['High'].max()
     low = df['Low'].min()
     diff = high - low
@@ -84,9 +103,11 @@ def send_telegram(token, chat_id, message):
     except Exception as e:
         print(f"❌ Gagal Kirim: {e}")
 
-# --- LOGIC ANALYSIS & REPORT GENERATOR ---
+# --- LOGIC ANALYSIS & REPORT ---
 def generate_bot_report(xau, paxg, kurs):
-    # Hitung Indikator
+    if xau.empty: return "Data Kosong", "WAIT"
+
+    # Analisa teknikal menggunakan data PAXG (via variabel xau)
     xau = add_manual_indicators(xau)
     
     # VPVR Logic
@@ -100,7 +121,7 @@ def generate_bot_report(xau, paxg, kurs):
     last_xau = xau.iloc[-1]
     last_paxg = paxg.iloc[-1]
     
-    # Ambil Data Indikator
+    # Indikator
     stoch_k = last_xau['STOCHRSIk']
     stoch_d = last_xau['STOCHRSId']
     
@@ -109,15 +130,15 @@ def generate_bot_report(xau, paxg, kurs):
     elif stoch_k < 20: res_stoch = ("⚪ WAIT", "Oversold")
     else: res_stoch = ("⚪ NEUTRAL", f"{stoch_k:.1f}")
     
-    # MACD Logic
+    # MACD
     if last_xau['MACD'] > last_xau['MACD_Signal']: res_macd = ("🟢 BULLISH", "Trend Naik")
     else: res_macd = ("🔴 BEARISH", "Trend Turun")
     
-    # POC Logic
+    # VPVR
     if last_xau['Close'] > poc: res_vpvr = ("🟢 STRONG", "Above POC")
     else: res_vpvr = ("🔴 WEAK", "Below POC")
     
-    # BB Logic
+    # Bollinger
     if last_xau['Close'] <= last_xau['BBL']: res_bb = ("🟢 BUY ZONE", "Lower Band")
     elif last_xau['Close'] >= last_xau['BBU']: res_bb = ("🔴 SELL ZONE", "Upper Band")
     else: res_bb = ("⚪ INSIDE", "Normal")
@@ -135,6 +156,7 @@ def generate_bot_report(xau, paxg, kurs):
     validation = "Market sideways."
     
     # LOGIKA PENGAMBILAN KEPUTUSAN
+    # Note: Variabel current_paxg_usd sudah kena kalibrasi di get_data_engine
     if (res_stoch[0] == "🟢 BULLISH") and (current_paxg_usd <= target_buy_usd + 10):
         decision = "🔵 BUY / LONG"
         validation = "✅ VALIDATED: Rebound Golden Pocket + Stoch Cross Up."
@@ -148,21 +170,19 @@ def generate_bot_report(xau, paxg, kurs):
         decision = "🛑 CUT LOSS / STOP BUY"
         validation = "⚠️ INVALID: Jebol Support Kuat."
 
-    # BUILD REPORT STRING
     now = datetime.now(pytz.timezone('Asia/Jakarta'))
     report = f"""🦅 GOLD MASTER AUTOMATION
 📅 Waktu: {now.strftime('%d %b %Y | %H:%M WIB')}
 ============================================================
 
-💰 UPDATE HARGA & RANGE
+💰 UPDATE HARGA (SOURCE: PAXG + CALIBRATION)
 💵 KURS USD/IDR : {fmt_idr(kurs)}
 ------------------------------------------------------------
-🏆 XAU/USD      : {fmt_usd(last_xau['Close'])}
-🏆 XAU/IDR Gram : {fmt_idr((last_xau['Close'] * kurs) / 31.1035)}
+💎 PAXG/USD      : {fmt_usd(current_paxg_usd)}
+💎 PAXG/IDR      : {fmt_idr(current_paxg_usd * kurs)}
+   *(Estimasi Ajaib +1.5%: {fmt_idr(current_paxg_usd * kurs * SPREAD_AJAIB)})*
 ------------------------------------------------------------
-💎 PAXG/USD     : {fmt_usd(current_paxg_usd)}
-💎 PAXG/IDR     : {fmt_idr(current_paxg_usd * kurs)} - {fmt_idr(current_paxg_usd * kurs * SPREAD_AJAIB)}
-   *(Range: Harga Wajar s.d. Estimasi App Ajaib +1.5%)*
+(Note: Analisa Teknikal 100% menggunakan grafik PAXG yang dikalibrasi)
 
 📊 HASIL ANALISIS (5 METODE)
 1. Stoch RSI   [{res_stoch[0]}] : {res_stoch[1]}
@@ -176,28 +196,26 @@ def generate_bot_report(xau, paxg, kurs):
 🔐 VALIDATED BY      : {validation}
 ============================================================
 
-🎯 MAPPING AREA TERDEKAT & SKENARIO
+🎯 MAPPING AREA TERDEKAT (PAXG)
 """
     levels_sorted = ["MOONBAG (1.618)", "RESISTANCE (High)", "GOLDEN POCKET (0.618)", "FLOOR (Low)"]
     for name in levels_sorted:
-        xau_val = xau_fib[name]
         paxg_val = paxg_fib[name]
         paxg_idr = paxg_val * kurs * SPREAD_AJAIB
         report += f"\n📍 LEVEL: {name}"
-        report += f"\n   • XAU : {fmt_usd(xau_val)}"
-        report += f"\n   • PAXG: {fmt_usd(paxg_val)} | {fmt_idr(paxg_idr)} (Est. Ajaib)"
+        report += f"\n   • USD : {fmt_usd(paxg_val)}"
+        report += f"\n   • IDR : {fmt_idr(paxg_idr)} (Est. Ajaib)"
         if "MOONBAG" in name: report += "\n   👉 [TARGET] TP 2 / Jual Semua."
         elif "RESISTANCE" in name: report += "\n   👉 [UJI NYALI] Tembus=Moonbag. Gagal=Turun."
         elif "GOLDEN POCKET" in name: report += "\n   👉 [BUY ZONE] Mantul=Buy. Jebol=Cut Loss."
         elif "FLOOR" in name: report += "\n   👉 [BAHAYA] Pertahanan Terakhir."
         report += "\n"
 
-    # RETURN REPORT DAN DECISION (PENTING BUAT FILTER)
     return report, decision
 
 # --- EKSEKUTOR UTAMA (MAIN) ---
 if __name__ == "__main__":
-    print("🤖 Robot Start (Manual Math Mode)...")
+    print("🤖 Robot Start (PAXG-Only Mode)...")
     
     # 1. Ambil Secrets
     try:
@@ -210,20 +228,22 @@ if __name__ == "__main__":
     # 2. Jalanin Analisis
     try:
         xau, paxg, kurs = get_data_engine()
-        final_report, decision = generate_bot_report(xau, paxg, kurs)
         
-        print(f"🧐 Decision saat ini: {decision}")
-
-        # 3. Filter Kirim
-        # Cuma kirim kalau BUY atau SELL. Kalau WAIT/HOLD, diem aja biar ga spam.
-        if "BUY" in decision or "SELL" in decision or "CUT LOSS" in decision:
-            print("🚀 Sinyal Penting! Mengirim ke Telegram...")
-            send_telegram(TOKEN, CHAT_ID, final_report)
+        if xau.empty:
+            print("❌ Data Kosong, skip cycle ini.")
         else:
-            # Opsi: Kalau mau tetap laporan tiap 4 jam walau sideways, uncomment baris bawah:
-            send_telegram(TOKEN, CHAT_ID, final_report)
-            # print("💤 Market Sideways (WAIT/HOLD). Tidak kirim laporan.")
+            final_report, decision = generate_bot_report(xau, paxg, kurs)
+            print(f"🧐 Decision saat ini: {decision}")
+
+            # 3. Filter Kirim
+            # Kirim kalau ada sinyal BUY/SELL/CUT LOSS
+            if "BUY" in decision or "SELL" in decision or "CUT LOSS" in decision:
+                print("🚀 Sinyal Penting! Mengirim ke Telegram...")
+                send_telegram(TOKEN, CHAT_ID, final_report)
+            else:
+                # Kalau mau tetap kirim saat WAIT/HOLD buat debug, uncomment baris ini:
+                send_telegram(TOKEN, CHAT_ID, final_report)
+                # print("💤 Market Sideways (WAIT/HOLD). Tidak kirim laporan.")
             
     except Exception as e:
         print(f"❌ Terjadi Error di Logic: {e}")
-
