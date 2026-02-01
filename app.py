@@ -1,7 +1,6 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import numpy as np
 import plotly.graph_objects as go
 import requests
@@ -11,12 +10,10 @@ import pytz
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(page_title="Gold Master Automation", page_icon="🦅", layout="wide")
 
-# --- CSS FIX (Warna Metric Normal) ---
+# --- CSS FIX ---
 st.markdown("""
 <style>
-    [data-testid="stMetricValue"] {
-        font-size: 24px;
-    }
+    [data-testid="stMetricValue"] { font-size: 24px; }
     .report-text { 
         font-family: 'Courier New', monospace; 
         white-space: pre-wrap; 
@@ -39,7 +36,43 @@ SPREAD_AJAIB = 1.015
 def fmt_idr(val): return f"Rp {val:,.0f}".replace(",", ".")
 def fmt_usd(val): return f"${val:,.2f}"
 
-# --- FUNGSI UTAMA ---
+# --- FUNGSI INDIKATOR MANUAL (PENGGANTI PANDAS_TA) ---
+def add_manual_indicators(df):
+    df = df.copy()
+    
+    # 1. MACD (12, 26, 9)
+    # EMA Short & Long
+    k = df['Close'].ewm(span=12, adjust=False, min_periods=12).mean()
+    d = df['Close'].ewm(span=26, adjust=False, min_periods=26).mean()
+    df['MACD'] = k - d
+    # Signal Line
+    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False, min_periods=9).mean()
+    
+    # 2. Bollinger Bands (20, 2)
+    df['SMA20'] = df['Close'].rolling(window=20).mean()
+    df['STD20'] = df['Close'].rolling(window=20).std()
+    df['BBU'] = df['SMA20'] + (df['STD20'] * 2) # Upper
+    df['BBL'] = df['SMA20'] - (df['STD20'] * 2) # Lower
+    
+    # 3. Stochastic RSI (14, 14, 3, 3)
+    # Hitung RSI Biasa Dulu
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    
+    # Hitung Stoch dari RSI
+    min_rsi = df['RSI'].rolling(window=14).min()
+    max_rsi = df['RSI'].rolling(window=14).max()
+    # Rumus Stoch K & D
+    stoch_rsi = (df['RSI'] - min_rsi) / (max_rsi - min_rsi)
+    df['STOCHRSIk'] = stoch_rsi.rolling(window=3).mean() * 100 # Kali 100 biar skala 0-100
+    df['STOCHRSId'] = df['STOCHRSIk'].rolling(window=3).mean()
+    
+    return df
+
+# --- FUNGSI GET DATA ---
 @st.cache_data(ttl=300)
 def get_data_engine():
     df = yf.download(TICKERS, period=PERIOD, interval=INTERVAL, group_by='ticker', progress=False, threads=False)
@@ -79,11 +112,10 @@ def send_telegram_alert(token, chat_id, message):
 
 # --- LOGIC ANALYSIS & REPORT ---
 def generate_analysis_report(xau, paxg, kurs):
-    xau = xau.copy()
-    xau.ta.stochrsi(append=True)
-    xau.ta.macd(append=True)
-    xau.ta.bbands(append=True)
+    # >>> INI BEDANYA: Panggil fungsi manual, bukan pandas_ta <<<
+    xau = add_manual_indicators(xau)
     
+    # VPVR Logic (Tetap pake pandas native)
     price_bins = pd.cut(xau['Close'], bins=50)
     vpvr = xau.groupby(price_bins, observed=True)['Volume'].sum()
     poc = vpvr.idxmax().mid
@@ -94,28 +126,26 @@ def generate_analysis_report(xau, paxg, kurs):
     last_xau = xau.iloc[-1]
     last_paxg = paxg.iloc[-1]
     
-    k_col = [c for c in xau.columns if "STOCHRSIk" in c][0]
-    d_col = [c for c in xau.columns if "STOCHRSId" in c][0]
-    stoch_k = last_xau[k_col]
-    stoch_d = last_xau[d_col]
+    # Ambil Data (Sekarang nama kolomnya sudah pasti, gak perlu search aneh-aneh)
+    stoch_k = last_xau['STOCHRSIk']
+    stoch_d = last_xau['STOCHRSId']
     
     if stoch_k < 20 and stoch_k > stoch_d: res_stoch = ("🟢 BULLISH", "Golden Cross")
     elif stoch_k > 80 and stoch_k < stoch_d: res_stoch = ("🔴 BEARISH", "Death Cross")
     elif stoch_k < 20: res_stoch = ("⚪ WAIT", "Oversold")
     else: res_stoch = ("⚪ NEUTRAL", f"{stoch_k:.1f}")
     
-    macd_col = [c for c in xau.columns if "MACD_" in c and "s_" not in c][0]
-    sig_col = [c for c in xau.columns if "MACDs_" in c][0]
-    if last_xau[macd_col] > last_xau[sig_col]: res_macd = ("🟢 BULLISH", "Trend Naik")
+    # MACD Logic
+    if last_xau['MACD'] > last_xau['MACD_Signal']: res_macd = ("🟢 BULLISH", "Trend Naik")
     else: res_macd = ("🔴 BEARISH", "Trend Turun")
     
+    # POC Logic
     if last_xau['Close'] > poc: res_vpvr = ("🟢 STRONG", "Above POC")
     else: res_vpvr = ("🔴 WEAK", "Below POC")
     
-    bbu_col = [c for c in xau.columns if "BBU_" in c][0]
-    bbl_col = [c for c in xau.columns if "BBL_" in c][0]
-    if last_xau['Close'] <= last_xau[bbl_col]: res_bb = ("🟢 BUY ZONE", "Lower Band")
-    elif last_xau['Close'] >= last_xau[bbu_col]: res_bb = ("🔴 SELL ZONE", "Upper Band")
+    # BB Logic
+    if last_xau['Close'] <= last_xau['BBL']: res_bb = ("🟢 BUY ZONE", "Lower Band")
+    elif last_xau['Close'] >= last_xau['BBU']: res_bb = ("🔴 SELL ZONE", "Upper Band")
     else: res_bb = ("⚪ INSIDE", "Normal")
     
     dist_to_gold = last_xau['Close'] - xau_fib["GOLDEN POCKET (0.618)"]
@@ -191,11 +221,11 @@ def generate_analysis_report(xau, paxg, kurs):
 # --- HALAMAN UTAMA ---
 st.title("🦅 Gold Master Automation")
 
-with st.spinner("Sedang Menganalisis..."):
+with st.spinner("Sedang Menganalisis (Manual Calculation)..."):
     xau_data, paxg_data, kurs_val = get_data_engine()
     final_report, xau_processed, xau_fib_levels, last_xau_row, last_paxg_row = generate_analysis_report(xau_data, paxg_data, kurs_val)
 
-# --- SIDEBAR (AUTO-LOGIN) ---
+# --- SIDEBAR ---
 st.sidebar.header("⚙️ Konfigurasi")
 
 if "TELEGRAM_TOKEN" in st.secrets:
