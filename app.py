@@ -79,7 +79,7 @@ def get_data_engine():
         # 1. Ambil Data PAXG
         # Handle beda format yfinance (kadang return MultiIndex, kadang tidak)
         if isinstance(df.columns, pd.MultiIndex):
-            paxg = df['PAXG-USD'].dropna()
+            paxg = df['PAXG-USD'].dropna()*  0.99048968
         else:
             # Fallback kalau yfinance ngaco strukturnya
             # Kita cari kolom yang ada bau-bau PAXG
@@ -298,3 +298,4 @@ with st.spinner("Sedang Menganalisis PAXG Market..."):
                 else: st.error(f"Gagal: {msg}")
 
         st.text_area("Output Logika:", value=final_report, height=600, label_visibility="collapsed")
+
