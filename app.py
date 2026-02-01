@@ -27,7 +27,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- KONFIGURASI ENGINE ---
-TICKERS = ["XAU-USD", "PAXG-USD", "IDR=X"]
+TICKERS = ["GC=F", "PAXG-USD", "IDR=X"]
 INTERVAL = "1h"
 PERIOD = "1mo"
 SPREAD_AJAIB = 1.015 
@@ -275,4 +275,5 @@ with col1:
         else: st.error(f"Gagal: {msg}")
 
 st.text_area("Output Logika:", value=final_report, height=600, label_visibility="collapsed")
+
 
