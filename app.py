@@ -224,7 +224,7 @@ def generate_sop_report(df_d, df_4h, kurs):
 
     now = datetime.now(pytz.timezone('Asia/Jakarta'))
     
-    report = f"""🦅 GOLD MASTER SOP REPORT
+    report = f"""GOLD INVESTMENT REPORT
 📅 Waktu: {now.strftime('%d %b %Y | %H:%M WIB')}
 ============================================================
 
@@ -332,5 +332,6 @@ with st.spinner("Menganalisa Data SOP..."):
                 else: st.error(f"Gagal: {msg}")
 
         st.text_area("Report:", value=final_report, height=700, label_visibility="collapsed")
+
 
 
