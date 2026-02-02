@@ -49,6 +49,9 @@ def process_data_smart(df):
     df['BBU'] = df['SMA20'] + (df['STD20'] * 2)
     df['BBL'] = df['SMA20'] - (df['STD20'] * 2)
     df['BBM'] = df['SMA20']
+    # Volatility (Band Width)
+    df['BB_Width'] = (df['BBU'] - df['BBL']) / df['BBM']
+    
     # 3. MACD
     k = df['Close'].ewm(span=12, adjust=False).mean()
     d = df['Close'].ewm(span=26, adjust=False).mean()
@@ -91,11 +94,12 @@ def calculate_fibonacci_levels(df):
         "FLOOR (Low)": low
     }
 
-# --- SCORING ENGINE (DETAIL RESTORED) ---
+# --- SCORING ENGINE (COMPREHENSIVE) ---
 def calculate_quant_score(row, prev_row, poc, fibo_golden):
     price = row['Close']
     scores = {}
     details = {}
+    bullish_flags = 0
 
     # 1. EMA 200 (Weight 30%)
     ema = row['EMA200']
@@ -107,9 +111,9 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden):
     else: score_ema = 30 
     
     scores['EMA'] = score_ema
-    # DETAIL DIKEMBALIKAN:
     trend_txt = "BULLISH" if price > ema else "BEARISH"
     details['EMA'] = f"{trend_txt} | Price ${price:.0f} vs EMA ${ema:.0f} ({dist_pct:+.1f}%)"
+    if score_ema >= 55: bullish_flags += 1
 
     # 2. VPVR POC (Weight 20%)
     if price > poc: score_vpvr = 100 
@@ -117,9 +121,9 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden):
     else: score_vpvr = 30 
     
     scores['VPVR'] = score_vpvr
-    # DETAIL DIKEMBALIKAN:
     pos_txt = "Above Wall" if price > poc else "Below Wall"
     details['VPVR'] = f"{pos_txt} | POC: ${poc:.0f}"
+    if score_vpvr >= 60: bullish_flags += 1
 
     # 3. MACD (Weight 15%)
     hist = row['MACD_Hist']
@@ -130,10 +134,10 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden):
     else: score_macd = 30
     
     scores['MACD'] = score_macd
-    # DETAIL DIKEMBALIKAN:
     line = row['MACD']
     sig = row['MACD_Signal']
     details['MACD'] = f"Hist: {hist:+.2f} | Line: {line:.1f} | Sig: {sig:.1f}"
+    if score_macd >= 70: bullish_flags += 1
 
     # 4. Stoch RSI (Weight 10%)
     k = row['STOCHRSIk']
@@ -144,8 +148,8 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden):
     else: score_stoch = 50
     
     scores['STOCH'] = score_stoch
-    # DETAIL DIKEMBALIKAN:
     details['STOCH'] = f"Value: {k:.1f} (D: {d:.1f})"
+    if score_stoch >= 65: bullish_flags += 1
 
     # 5. Bollinger Bands (Weight 10%)
     if price <= row['BBL']: score_bb = 85
@@ -154,8 +158,8 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden):
     else: score_bb = 20
     
     scores['BB'] = score_bb
-    # DETAIL DIKEMBALIKAN:
     details['BB'] = f"Upper: ${row['BBU']:.0f} | Lower: ${row['BBL']:.0f}"
+    if score_bb >= 65: bullish_flags += 1
 
     # 6. Fibonacci (Weight 15%)
     dist_fibo_pct = abs((price - fibo_golden) / fibo_golden) * 100
@@ -165,8 +169,8 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden):
     else: score_fibo = 75
     
     scores['FIBO'] = score_fibo
-    # DETAIL DIKEMBALIKAN:
     details['FIBO'] = f"Dist to Golden: {dist_fibo_pct:.1f}% | Target: ${fibo_golden:.0f}"
+    if score_fibo >= 55: bullish_flags += 1
 
     # COMPOSITE SCORE
     final_score = (
@@ -174,7 +178,7 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden):
         (scores['STOCH'] * 0.10) + (scores['BB'] * 0.10) + (scores['FIBO'] * 0.15)
     )
     
-    return final_score, scores, details
+    return final_score, scores, details, bullish_flags
 
 # --- DATA ENGINE ---
 @st.cache_data(ttl=300)
@@ -226,28 +230,42 @@ def generate_sop_report(df_6mo, df_4h, kurs):
     fibo = calculate_fibonacci_levels(df_6mo) 
     poc = get_poc(df_6mo)
     
-    # 1. HITUNG SKOR KUANTITATIF
-    final_score, scores, details = calculate_quant_score(last_d, prev_d, poc, fibo['GOLDEN (0.618)'])
+    # 1. HITUNG SKOR KUANTITATIF & AGREEMENT RATIO
+    final_score, scores, details, bullish_count = calculate_quant_score(last_d, prev_d, poc, fibo['GOLDEN (0.618)'])
     
-    # 2. PROBABILITY MODEL
+    # 2. MARKET REGIME & VOLATILITY (NEW)
+    ema_dist = ((last_d['Close'] - last_d['EMA200']) / last_d['EMA200']) * 100
+    if ema_dist > 5: regime = "🐎 TRENDING BULLISH"
+    elif ema_dist < -5: regime = "🐻 TRENDING BEARISH"
+    else: regime = "🦀 RANGING / SIDEWAYS"
+    
+    bb_width = last_d['BB_Width']
+    if bb_width > 0.15: volatility = "⚡ HIGH VOLATILITY"
+    elif bb_width < 0.05: volatility = "💤 LOW VOLATILITY (SQUEEZE)"
+    else: volatility = "🌊 NORMAL VOLATILITY"
+
+    # 3. AGREEMENT RATIO (NEW)
+    agreement_ratio = f"{bullish_count}/6 Indicators Bullish ({(bullish_count/6)*100:.0f}%)"
+
+    # 4. PROBABILITY MODEL
     if final_score >= 80:
         decision = "🚀 STRONG BUY"
-        prob = "High Probability (>80%)"
+        prob = "High (>80%) - Aggressive Entry"
         dana_market, dana_limit = MODAL_GAJI * 0.7, MODAL_GAJI * 0.3
     elif 65 <= final_score < 80:
         decision = "✅ GRADUAL BUY"
-        prob = "Moderate Probability (65-79%)"
+        prob = "Moderate (65-79%) - Standard Entry"
         dana_market, dana_limit = MODAL_GAJI * 0.5, MODAL_GAJI * 0.5
     elif 50 <= final_score < 65:
         decision = "⚠️ WAIT PULLBACK"
-        prob = "Low Probability (Wait for Dip)"
+        prob = "Low (Wait Dip) - Defensive Entry"
         dana_market, dana_limit = MODAL_GAJI * 0.2, MODAL_GAJI * 0.8
     else:
         decision = "🛑 AVOID ENTRY"
-        prob = "Negative/Risk High"
+        prob = "Negative - Cash is King"
         dana_market, dana_limit = 0, MODAL_GAJI
 
-    # 3. LIMIT TARGETING
+    # 5. LIMIT TARGETING
     candidates = [poc, last_d['EMA200'], fibo['0.382'], fibo['MID (0.5)'], fibo['GOLDEN (0.618)']]
     valid_supports = [x for x in candidates if x < last_d['Close']]
     target_limit_usd = max(valid_supports) if valid_supports else fibo['MID (0.5)']
@@ -255,7 +273,7 @@ def generate_sop_report(df_6mo, df_4h, kurs):
 
     now = datetime.now(pytz.timezone('Asia/Jakarta'))
     
-    report = f"""🦅 GOLD MASTER QUANTITATIVE (V4.1 FIXED)
+    report = f"""🦅 GOLD MASTER QUANTITATIVE (FULL METRICS)
 📅 Waktu: {now.strftime('%d %b %Y | %H:%M WIB')}
 =======================================
 
@@ -263,26 +281,19 @@ def generate_sop_report(df_6mo, df_4h, kurs):
 PAXG/USD : {fmt_usd(last_d['Close'])}
 KURS IDR : {fmt_idr(kurs)}
 
-📊 MATRIX 6 INDIKATOR (DETAILED)
-1. EMA 200    [{scores['EMA']}]
-   👉 {details['EMA']}
+📊 MATRIX 6 INDIKATOR
+1. EMA 200    [{scores['EMA']}] {details['EMA']}
+2. VPVR POC   [{scores['VPVR']}] {details['VPVR']}
+3. MACD       [{scores['MACD']}] {details['MACD']}
+4. Stoch RSI  [{scores['STOCH']}] {details['STOCH']}
+5. Bollinger  [{scores['BB']}] {details['BB']}
+6. Fibonacci  [{scores['FIBO']}] {details['FIBO']}
 
-2. VPVR POC   [{scores['VPVR']}]
-   👉 {details['VPVR']}
+🧮 COMPOSITE SCORE : {final_score:.1f} / 100
+🌍 MARKET REGIME   : {regime}
+⚡ VOLATILITY      : {volatility}
+🤝 AGREEMENT RATIO : {agreement_ratio}
 
-3. MACD       [{scores['MACD']}]
-   👉 {details['MACD']}
-
-4. Stoch RSI  [{scores['STOCH']}]
-   👉 {details['STOCH']}
-
-5. Bollinger  [{scores['BB']}]
-   👉 {details['BB']}
-
-6. Fibonacci  [{scores['FIBO']}]
-   👉 {details['FIBO']}
-
-🧮 COMPOSITE SCORE: {final_score:.1f} / 100
 =======================================
 🧠 KEPUTUSAN : [ {decision} ]
 🎲 PROBABILITAS: {prob}
@@ -307,7 +318,7 @@ KURS IDR : {fmt_idr(kurs)}
     return report, df_6mo, fibo, final_score
 
 # --- MAIN APP ---
-st.title("Gold Master Quantitative (Detailed View)")
+st.title("Gold Master Quantitative (Full Metrics)")
 
 with st.spinner("Processing Quantitative Data..."):
     df_6mo, df_4h, kurs_val = get_data_engine()
@@ -331,21 +342,17 @@ with st.spinner("Processing Quantitative Data..."):
         st.sidebar.metric("COMPOSITE SCORE", f"{score_val:.1f}/100", delta="Quality", delta_color=score_color)
         st.sidebar.metric("PAXG/USD", fmt_usd(xau_processed.iloc[-1]['Close']))
 
-        # --- CHART (DENGAN FIBO & EMA KEMBALI) ---
+        # --- CHART ---
         st.subheader("📊 Chart Daily + Indicators")
         fig = go.Figure(data=[go.Candlestick(x=xau_processed.index,
                                 open=xau_processed['Open'], high=xau_processed['High'],
                                 low=xau_processed['Low'], close=xau_processed['Close'],
                                 name='PAXG/USD')])
         
-        # EMA 200
         fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['EMA200'], line=dict(color='blue', width=2), name='EMA 200'))
-        
-        # Bollinger
         fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['BBU'], line=dict(color='red', width=1, dash='dot'), name='Upper BB'))
         fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['BBL'], line=dict(color='green', width=1, dash='dot'), name='Lower BB'))
         
-        # ✅ FIBONACCI LINES (RESTORED)
         colors_fib = {"MOONBAG": "lime", "RESISTANCE": "red", "GOLDEN": "gold", "FLOOR": "white", "MID": "gray"}
         for label, val in fib_levels.items():
             c = "gray"
