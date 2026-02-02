@@ -38,19 +38,23 @@ PAXG_MULTIPLIER = 0.99048968
 def fmt_idr(val): return f"Rp {val:,.0f}".replace(",", ".")
 def fmt_usd(val): return f"${val:,.2f}"
 
-# --- FUNGSI INDIKATOR ---
+# --- FUNGSI INDIKATOR (FIXED: BB_WIDTH ADDED) ---
 def process_data_smart(df):
     df = df.copy()
+    
     # 1. EMA 200
     df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
-    # 2. Bollinger
+    
+    # 2. Bollinger Bands
     df['SMA20'] = df['Close'].rolling(window=20).mean()
     df['STD20'] = df['Close'].rolling(window=20).std()
     df['BBU'] = df['SMA20'] + (df['STD20'] * 2)
     df['BBL'] = df['SMA20'] - (df['STD20'] * 2)
     df['BBM'] = df['SMA20']
-    # Volatility (Band Width)
-    df['BB_Width'] = (df['BBU'] - df['BBL']) / df['BBM']
+    
+    # --- FIX: PASTIKAN INI ADA UNTUK MENGHINDARI KEYERROR ---
+    # Menghitung Lebar Bollinger Band untuk Volatilitas
+    df['BB_Width'] = (df['BBU'] - df['BBL']) / df['BBM'] 
     
     # 3. MACD
     k = df['Close'].ewm(span=12, adjust=False).mean()
@@ -58,17 +62,20 @@ def process_data_smart(df):
     df['MACD'] = k - d
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+    
     # 4. Stoch RSI
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
+    
     min_rsi = df['RSI'].rolling(window=14).min()
     max_rsi = df['RSI'].rolling(window=14).max()
     stoch = (df['RSI'] - min_rsi) / (max_rsi - min_rsi)
     df['STOCHRSIk'] = stoch.rolling(window=3).mean() * 100
     df['STOCHRSId'] = df['STOCHRSIk'].rolling(window=3).mean()
+    
     return df
 
 # --- HITUNG POC (VPVR) ---
@@ -94,7 +101,7 @@ def calculate_fibonacci_levels(df):
         "FLOOR (Low)": low
     }
 
-# --- SCORING ENGINE (COMPREHENSIVE) ---
+# --- SCORING ENGINE ---
 def calculate_quant_score(row, prev_row, poc, fibo_golden):
     price = row['Close']
     scores = {}
@@ -200,9 +207,13 @@ def get_data_engine():
             df['Low'] *= PAXG_MULTIPLIER
             df['Open'] *= PAXG_MULTIPLIER
 
+        # Process Indicators (TERMASUK BB_WIDTH)
         paxg_d = process_data_smart(paxg_d)
+        
+        # Slicing
         paxg_6mo = paxg_d.tail(180).copy()
         
+        # Hourly Process
         paxg_4h = paxg_h.resample('4h').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
         paxg_4h = process_data_smart(paxg_4h)
 
@@ -233,18 +244,20 @@ def generate_sop_report(df_6mo, df_4h, kurs):
     # 1. HITUNG SKOR KUANTITATIF & AGREEMENT RATIO
     final_score, scores, details, bullish_count = calculate_quant_score(last_d, prev_d, poc, fibo['GOLDEN (0.618)'])
     
-    # 2. MARKET REGIME & VOLATILITY (NEW)
+    # 2. MARKET REGIME & VOLATILITY (FIXED BB_WIDTH ACCESS)
     ema_dist = ((last_d['Close'] - last_d['EMA200']) / last_d['EMA200']) * 100
+    
     if ema_dist > 5: regime = "🐎 TRENDING BULLISH"
     elif ema_dist < -5: regime = "🐻 TRENDING BEARISH"
     else: regime = "🦀 RANGING / SIDEWAYS"
     
-    bb_width = last_d['BB_Width']
+    # Safe Access to BB_Width with Fallback
+    bb_width = last_d.get('BB_Width', 0) 
     if bb_width > 0.15: volatility = "⚡ HIGH VOLATILITY"
     elif bb_width < 0.05: volatility = "💤 LOW VOLATILITY (SQUEEZE)"
     else: volatility = "🌊 NORMAL VOLATILITY"
 
-    # 3. AGREEMENT RATIO (NEW)
+    # 3. AGREEMENT RATIO
     agreement_ratio = f"{bullish_count}/6 Indicators Bullish ({(bullish_count/6)*100:.0f}%)"
 
     # 4. PROBABILITY MODEL
