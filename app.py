@@ -76,19 +76,23 @@ def get_poc(df):
     vpvr = df.groupby(price_bins, observed=True)['Volume'].sum()
     return vpvr.idxmax().mid
 
-# --- FIBONACCI LEVELS ---
+# --- FIBONACCI LEVELS (LOGIC FIXED) ---
 def calculate_fibonacci_levels(df):
     if df.empty: return {}
     high = df['High'].max()
     low = df['Low'].min()
     diff = high - low
+    
+    # Perhitungan Retracement Standar (Dari Atas ke Bawah)
+    # Agar urutannya logis secara harga
     levels = {
         "MOONBAG (1.618)": high + (diff * 0.618),
         "RESISTANCE (High)": high,
-        "0.786": low + (diff * 0.786),
-        "GOLDEN POCKET (0.618)": high - (diff * 0.618), # Retracement dari High
+        "0.236 (Pullback)": high - (diff * 0.236),
+        "0.382 (Shallow)": high - (diff * 0.382),
         "MID (0.5)": high - (diff * 0.5),
-        "0.382": high - (diff * 0.382),
+        "GOLDEN (0.618)": high - (diff * 0.618),
+        "0.786 (Deep)": high - (diff * 0.786),
         "FLOOR (Low)": low
     }
     return levels
@@ -177,7 +181,7 @@ def generate_sop_report(df_d, df_4h, kurs):
     else: bb_stat = "⚪ INSIDE BANDS"
     
     # 5. Fibo
-    dist_gold = last_d['Close'] - fibo['GOLDEN POCKET (0.618)']
+    dist_gold = last_d['Close'] - fibo['GOLDEN (0.618)']
     if abs(dist_gold) < 20: fib_stat = "⚠️ TESTING GOLDEN"
     elif dist_gold > 0: fib_stat = "⚪ ABOVE SUPPORT"
     else: fib_stat = "🟢 DISCOUNT AREA"
@@ -201,7 +205,8 @@ def generate_sop_report(df_d, df_4h, kurs):
         dana_limit = MODAL_GAJI * 0.5
         
         # Target Limit: Max(POC, Fibo 0.618) tapi di bawah harga skrg
-        limit_target = max(poc, fibo['GOLDEN POCKET (0.618)'])
+        limit_target = max(poc, fibo['GOLDEN (0.618)'])
+        # Safety check: Kalau harga sekarang sudah di bawah limit, pakai support selanjutnya
         if limit_target >= last_d['Close']: limit_target = fibo['MID (0.5)']
         
         est_market = dana_market / (last_d['Close'] * kurs * SPREAD_AJAIB)
@@ -245,7 +250,7 @@ def generate_sop_report(df_d, df_4h, kurs):
    👉 Upper: ${bb_upper:.2f} | Lower: ${bb_lower:.2f}
 
 5. Fibonacci   [{fib_stat}]
-   👉 Golden Pkt: ${fibo['GOLDEN POCKET (0.618)']:.2f}
+   👉 Golden Pkt: ${fibo['GOLDEN (0.618)']:.2f}
 
 ============================================================
 🧠 KEPUTUSAN SOP : [ {decision} ]
@@ -255,9 +260,12 @@ def generate_sop_report(df_d, df_4h, kurs):
 📝 INSTRUKSI EKSEKUSI (MODAL 5 JUTA):
 {action_txt}
 
-🎯 MAPPING AREA (DAILY 6 MO)
+🎯 MAPPING AREA (SORTED BY PRICE)
 """
-    for name, val in fibo.items():
+    # ✅ SORTING DISINI: Harga Tertinggi ke Terendah
+    sorted_fibo = dict(sorted(fibo.items(), key=lambda item: item[1], reverse=True))
+
+    for name, val in sorted_fibo.items():
         paxg_idr = val * kurs * SPREAD_AJAIB
         report += f"{name:<20} : {fmt_usd(val)} | {fmt_idr(paxg_idr)}\n"
 
