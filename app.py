@@ -272,7 +272,7 @@ def generate_sop_report(df_d, df_4h, kurs):
     return report, df_d, fibo, is_swinger
 
 # --- MAIN APP ---
-st.title("🦅 Gold Master SOP (Tanggal 25)")
+st.title("Gold Investment Guide")
 
 with st.spinner("Menganalisa Data SOP..."):
     df_d, df_4h, kurs_val = get_data_engine()
@@ -332,4 +332,5 @@ with st.spinner("Menganalisa Data SOP..."):
                 else: st.error(f"Gagal: {msg}")
 
         st.text_area("Report:", value=final_report, height=700, label_visibility="collapsed")
+
 
