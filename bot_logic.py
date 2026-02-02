@@ -23,7 +23,7 @@ def fmt_usd(val): return f"${val:,.2f}"
 def process_data_smart(df):
     df = df.copy()
     
-    # 1. HITUNG EMA 200 (Pakai Data Full)
+    # 1. HITUNG EMA 200 (Pakai Data Full 2 Tahun)
     df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
 
     # 2. HITUNG Indikator Lain
@@ -156,40 +156,30 @@ def generate_sop_report(df_6mo, df_4h, kurs):
     last_d = df_6mo.iloc[-1]
     last_4h = df_4h.iloc[-1]
     
-    fibo = calculate_fibonacci_levels(df_6mo) # 
-
-[Image of fibonacci retracement levels]
-
+    fibo = calculate_fibonacci_levels(df_6mo) 
     poc = get_poc(df_6mo) 
     
     # 1. MATRIX 6 INDIKATOR
-    
-    # EMA 200
     ema200 = last_d['EMA200']
     price = last_d['Close']
     if price > ema200: ema_stat = "🟢 UPTREND"
     else: ema_stat = "🔴 DOWNTREND"
 
-    # Stoch RSI
     stoch_val = last_d['STOCHRSIk']
     if stoch_val > 80: st_stat = "🔴 OVERBOUGHT"
     elif stoch_val < 20: st_stat = "🟢 OVERSOLD"
     else: st_stat = "⚪ NEUTRAL"
     
-    # MACD
     if last_d['MACD'] > last_d['MACD_Signal']: mac_stat = "🟢 BULLISH"
     else: mac_stat = "🔴 BEARISH"
     
-    # VPVR
     if last_d['Close'] > poc: vp_stat = "🟢 STRONG (Above POC)"
     else: vp_stat = "🔴 WEAK (Below POC)"
     
-    # Bollinger
     if last_d['Close'] >= last_d['BBU']: bb_stat = "🔴 BREAKOUT UPPER"
     elif last_d['Close'] <= last_d['BBL']: bb_stat = "🟢 BREAKOUT LOWER"
     else: bb_stat = "⚪ INSIDE BANDS"
     
-    # Fibo
     dist_gold = last_d['Close'] - fibo['GOLDEN (0.618)']
     if abs(dist_gold) < 20: fib_stat = "⚠️ TESTING GOLDEN"
     elif dist_gold > 0: fib_stat = "⚪ ABOVE SUPPORT"
@@ -213,8 +203,17 @@ def generate_sop_report(df_6mo, df_4h, kurs):
         dana_market = MODAL_GAJI * 0.5
         dana_limit = MODAL_GAJI * 0.5
         
-        # Target Limit: Max(POC, Fibo 0.618, EMA200) yang ada di bawah harga
-        candidates = [poc, fibo['GOLDEN (0.618)'], ema200]
+        # --- LOGIC 100/100: SMART AGGRESSIVE LIMIT ---
+        # Masukkan SEMUA level support potensial termasuk Fibo Dnagkal (0.382 & 0.5)
+        candidates = [
+            poc, 
+            ema200, 
+            fibo['0.382 (Shallow)'], # Biar gak ketinggalan kalau trend kuat
+            fibo['MID (0.5)'], 
+            fibo['GOLDEN (0.618)']
+        ]
+        
+        # Ambil support TERTINGGI yang masih di bawah harga sekarang
         valid_supports = [x for x in candidates if x < price]
         
         if valid_supports: limit_target = max(valid_supports)
@@ -229,12 +228,12 @@ def generate_sop_report(df_6mo, df_4h, kurs):
 
 2. LIMIT ORDER (50%): Rp {dana_limit:,.0f}
    @ Harga ${limit_target:.2f} (Est. IDR: {fmt_idr(est_limit_idr)})
-   *(Target: EMA200/POC/Fibo)*
+   *(Target: Support Terdekat 0.382/0.5/POC/EMA)*
         """
 
     now = datetime.now(pytz.timezone('Asia/Jakarta'))
     
-    report = f"""🦅 GOLD MASTER GUIDE (EMA 200 + SMART SLICE)
+    report = f"""🦅 GOLD MASTER GUIDE (EMA 200 + SMART AGGRESSIVE)
 📅 Waktu: {now.strftime('%d %b %Y | %H:%M WIB')}
 ============================================================
 
