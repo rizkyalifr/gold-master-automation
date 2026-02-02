@@ -233,7 +233,7 @@ def send_telegram_alert(token, chat_id, message):
     except Exception as e:
         return False, str(e)
 
-# --- REPORT GENERATOR ---
+# --- REPORT GENERATOR (V5.0: BUY & SELL LOGIC) ---
 def generate_sop_report(df_6mo, df_4h, kurs):
     last_d = df_6mo.iloc[-1]
     prev_d = df_6mo.iloc[-2]
@@ -241,27 +241,45 @@ def generate_sop_report(df_6mo, df_4h, kurs):
     fibo = calculate_fibonacci_levels(df_6mo) 
     poc = get_poc(df_6mo)
     
-    # 1. HITUNG SKOR KUANTITATIF & AGREEMENT RATIO
+    # 1. HITUNG SKOR KUANTITATIF
     final_score, scores, details, bullish_count = calculate_quant_score(last_d, prev_d, poc, fibo['GOLDEN (0.618)'])
     
-    # 2. MARKET REGIME & VOLATILITY (FIXED BB_WIDTH ACCESS)
-    ema_dist = ((last_d['Close'] - last_d['EMA200']) / last_d['EMA200']) * 100
-    
-    if ema_dist > 5: regime = "🐎 TRENDING BULLISH"
-    elif ema_dist < -5: regime = "🐻 TRENDING BEARISH"
-    else: regime = "🦀 RANGING / SIDEWAYS"
-    
-    # Safe Access to BB_Width with Fallback
-    bb_width = last_d.get('BB_Width', 0) 
-    if bb_width > 0.15: volatility = "⚡ HIGH VOLATILITY"
-    elif bb_width < 0.05: volatility = "💤 LOW VOLATILITY (SQUEEZE)"
-    else: volatility = "🌊 NORMAL VOLATILITY"
+    # 2. DETEKSI MODE (Labeling)
+    if final_score >= 65:
+        market_mode = "✅ INVESTOR MODE (ACCUMULATION)"
+    elif 50 <= final_score < 65:
+        market_mode = "⚠️ SWINGER MODE (WAIT FOR DIP)"
+    else:
+        market_mode = "🛡️ DEFENSIVE MODE (CASH IS KING)"
 
-    # 3. AGREEMENT RATIO
-    agreement_ratio = f"{bullish_count}/6 Indicators Bullish ({(bullish_count/6)*100:.0f}%)"
+    # 3. DETEKSI SINYAL JUAL (TAKE PROFIT) - NEW FEATURE!
+    # Syarat Jual: Harga kena Resistance Tinggi ATAU Extreme Overbought
+    take_profit_signal = False
+    tp_reason = ""
+    
+    price = last_d['Close']
+    if price >= fibo['MOONBAG (1.618)']:
+        take_profit_signal = True
+        tp_reason = "Hit Moonbag Target (1.618)"
+    elif last_d['STOCHRSIk'] > 90 and price > last_d['BBU']:
+        take_profit_signal = True
+        tp_reason = "Extreme Overbought + Breakout BB"
 
-    # 4. PROBABILITY MODEL
-    if final_score >= 80:
+    # 4. DECISION ENGINE (BUY vs SELL)
+    dana_market, dana_limit = 0, 0
+    target_limit_usd, est_limit_idr = 0, 0
+    
+    if take_profit_signal:
+        decision = "💰 TAKE PROFIT / SELL"
+        prob = "Exit Signal Triggered"
+        action_txt = f"""
+1. JUAL SEBAGIAN ASET (20-50%).
+   👉 Alasan: {tp_reason}
+   👉 Amankan profit dalam bentuk Cash/USDT.
+
+2. JANGAN BELI DULU (Tunggu Koreksi).
+        """
+    elif final_score >= 80:
         decision = "🚀 STRONG BUY"
         prob = "High (>80%) - Aggressive Entry"
         dana_market, dana_limit = MODAL_GAJI * 0.7, MODAL_GAJI * 0.3
@@ -271,22 +289,40 @@ def generate_sop_report(df_6mo, df_4h, kurs):
         dana_market, dana_limit = MODAL_GAJI * 0.5, MODAL_GAJI * 0.5
     elif 50 <= final_score < 65:
         decision = "⚠️ WAIT PULLBACK"
-        prob = "Low (Wait Dip) - Defensive Entry"
+        prob = "Low (Wait Dip) - Sniper Entry"
         dana_market, dana_limit = MODAL_GAJI * 0.2, MODAL_GAJI * 0.8
     else:
         decision = "🛑 AVOID ENTRY"
-        prob = "Negative - Cash is King"
+        prob = "Negative - Save Cash"
         dana_market, dana_limit = 0, MODAL_GAJI
 
-    # 5. LIMIT TARGETING
-    candidates = [poc, last_d['EMA200'], fibo['0.382'], fibo['MID (0.5)'], fibo['GOLDEN (0.618)']]
-    valid_supports = [x for x in candidates if x < last_d['Close']]
-    target_limit_usd = max(valid_supports) if valid_supports else fibo['MID (0.5)']
-    est_limit_idr = target_limit_usd * kurs * SPREAD_AJAIB
+    # 5. SUSUN TEKS INSTRUKSI (Jika Bukan Sinyal Jual)
+    if not take_profit_signal:
+        # Target Limit Logic
+        candidates = [poc, last_d['EMA200'], fibo['0.382'], fibo['MID (0.5)'], fibo['GOLDEN (0.618)']]
+        valid_supports = [x for x in candidates if x < last_d['Close']]
+        target_limit_usd = max(valid_supports) if valid_supports else fibo['MID (0.5)']
+        est_limit_idr = target_limit_usd * kurs * SPREAD_AJAIB
+        
+        action_txt = f"""
+1. MARKET ORDER
+   👉 Nominal: {fmt_idr(dana_market)}
+   👉 Eksekusi: SEKARANG.
+
+2. LIMIT ORDER
+   👉 Nominal: {fmt_idr(dana_limit)}
+   👉 Pasang di: {fmt_usd(target_limit_usd)}
+   👉 Est. IDR : {fmt_idr(est_limit_idr)}
+        """
+
+    # 6. INFO TAMBAHAN
+    ema_dist = ((last_d['Close'] - last_d['EMA200']) / last_d['EMA200']) * 100
+    regime = "TRENDING" if abs(ema_dist) > 5 else "RANGING"
+    agreement = f"{bullish_count}/6 Bullish"
 
     now = datetime.now(pytz.timezone('Asia/Jakarta'))
     
-    report = f"""🦅 GOLD MASTER QUANTITATIVE (FULL METRICS)
+    report = f"""🦅 GOLD MASTER QUANTITATIVE (V5.0 COMPLETE)
 📅 Waktu: {now.strftime('%d %b %Y | %H:%M WIB')}
 =======================================
 
@@ -302,25 +338,15 @@ KURS IDR : {fmt_idr(kurs)}
 5. Bollinger  [{scores['BB']}] {details['BB']}
 6. Fibonacci  [{scores['FIBO']}] {details['FIBO']}
 
-🧮 COMPOSITE SCORE : {final_score:.1f} / 100
-🌍 MARKET REGIME   : {regime}
-⚡ VOLATILITY      : {volatility}
-🤝 AGREEMENT RATIO : {agreement_ratio}
-
+🧮 SCORE: {final_score:.1f}/100 | {agreement}
+🌍 MODE : {market_mode}
 =======================================
 🧠 KEPUTUSAN : [ {decision} ]
-🎲 PROBABILITAS: {prob}
+🎲 STATUS    : {prob}
 =======================================
 
 📋 INSTRUKSI EKSEKUSI (MODAL 5 JUTA):
-1️⃣ MARKET ORDER
-   👉 Nominal: {fmt_idr(dana_market)}
-   👉 Eksekusi: SEKARANG.
-
-2️⃣ LIMIT ORDER
-   👉 Nominal: {fmt_idr(dana_limit)}
-   👉 Pasang di: {fmt_usd(target_limit_usd)}
-   👉 Est. IDR : {fmt_idr(est_limit_idr)}
+{action_txt}
 
 🎯 MAPPING AREA FIBONACCI
 """
@@ -386,3 +412,4 @@ with st.spinner("Processing Quantitative Data..."):
                 else: st.error(f"Gagal: {msg}")
 
         st.text_area("Report:", value=final_report, height=700, label_visibility="collapsed")
+
