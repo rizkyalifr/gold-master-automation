@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 # --- KONFIGURASI HALAMAN ---
@@ -30,7 +30,7 @@ st.markdown("""
 
 # --- KONFIGURASI ENGINE ---
 TICKERS = ["PAXG-USD", "IDR=X"]
-MODAL_GAJI = 5000000  # 5 Juta Rupiah
+MODAL_GAJI = 5000000 
 SPREAD_AJAIB = 1.015 
 PAXG_MULTIPLIER = 0.99048968
 
@@ -38,27 +38,27 @@ PAXG_MULTIPLIER = 0.99048968
 def fmt_idr(val): return f"Rp {val:,.0f}".replace(",", ".")
 def fmt_usd(val): return f"${val:,.2f}"
 
-# --- FUNGSI INDIKATOR (ADDED EMA 200) ---
-def add_indicators(df):
+# --- FUNGSI INDIKATOR (ALL IN ONE) ---
+def process_data_smart(df):
     df = df.copy()
     
-    # 1. EMA 200 (Trend King) - NEW!
+    # 1. HITUNG EMA 200 (Pakai Data Full 2 Tahun)
     df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
 
-    # 2. MACD (12, 26, 9)
+    # 2. HITUNG Indikator Lain
+    # Bollinger
+    df['SMA20'] = df['Close'].rolling(window=20).mean()
+    df['STD20'] = df['Close'].rolling(window=20).std()
+    df['BBU'] = df['SMA20'] + (df['STD20'] * 2)
+    df['BBL'] = df['SMA20'] - (df['STD20'] * 2)
+    
+    # MACD
     k = df['Close'].ewm(span=12, adjust=False).mean()
     d = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = k - d
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     
-    # 3. Bollinger Bands (20, 2)
-    df['SMA20'] = df['Close'].rolling(window=20).mean()
-    df['STD20'] = df['Close'].rolling(window=20).std()
-    df['BBU'] = df['SMA20'] + (df['STD20'] * 2) # Upper
-    df['BBL'] = df['SMA20'] - (df['STD20'] * 2) # Lower
-    df['BBM'] = df['SMA20'] # Middle
-    
-    # 4. Stochastic RSI (14, 14, 3, 3)
+    # Stochastic RSI
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -73,7 +73,7 @@ def add_indicators(df):
     
     return df
 
-# --- HITUNG POC (VPVR SIMPLIFIED) ---
+# --- HITUNG POC (VPVR) ---
 def get_poc(df):
     price_bins = pd.cut(df['Close'], bins=50)
     vpvr = df.groupby(price_bins, observed=True)['Volume'].sum()
@@ -82,6 +82,7 @@ def get_poc(df):
 # --- FIBONACCI LEVELS ---
 def calculate_fibonacci_levels(df):
     if df.empty: return {}
+    # Fibo dihitung DARI DATA 6 BULAN SAJA (Biar akurat ke range sekarang)
     high = df['High'].max()
     low = df['Low'].min()
     diff = high - low
@@ -97,19 +98,19 @@ def calculate_fibonacci_levels(df):
     }
     return levels
 
-# --- DATA ENGINE (SOP: 1D & 4H) ---
+# --- DATA ENGINE (SMART SLICING) ---
 @st.cache_data(ttl=300)
 def get_data_engine():
-    # Fetch 2 TAHUN Daily (Supaya EMA 200 Valid)
-    df_daily = yf.download(TICKERS, period="2y", interval="1d", group_by='ticker', progress=False)
-    # Fetch 1 Bulan Hourly (Untuk konversi ke 4H)
+    # 1. Fetch 2 TAHUN (Untuk EMA 200)
+    df_full = yf.download(TICKERS, period="2y", interval="1d", group_by='ticker', progress=False)
+    # Fetch 1 Bulan Hourly (Untuk Swinger Check)
     df_hourly = yf.download(TICKERS, period="1mo", interval="1h", group_by='ticker', progress=False)
     
     try:
-        if isinstance(df_daily.columns, pd.MultiIndex):
-            paxg_d = df_daily['PAXG-USD'].dropna()
+        if isinstance(df_full.columns, pd.MultiIndex):
+            paxg_d = df_full['PAXG-USD'].dropna()
             paxg_h = df_hourly['PAXG-USD'].dropna()
-            kurs = df_daily['IDR=X']['Close'].iloc[-1]
+            kurs = df_full['IDR=X']['Close'].iloc[-1]
         else:
             return pd.DataFrame(), pd.DataFrame(), 16800
 
@@ -120,20 +121,25 @@ def get_data_engine():
             df['Low'] *= PAXG_MULTIPLIER
             df['Open'] *= PAXG_MULTIPLIER
 
-        # Indikator Daily
-        paxg_d = add_indicators(paxg_d)
+        # 2. HITUNG INDIKATOR DI DATA FULL (2 TAHUN) -> BIAR EMA VALID
+        paxg_d = process_data_smart(paxg_d)
         
-        # Resample Hourly ke 4H & Indikator
+        # 3. POTONG DATA JADI 6 BULAN (SLICING) -> BUAT FIBO & VPVR
+        # Kita ambil 180 candle terakhir (estimasi 6 bulan hari kalender / trading days)
+        paxg_6mo = paxg_d.tail(180).copy()
+        
+        # Resample Hourly ke 4H
         paxg_4h = paxg_h.resample('4h').agg({
             'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
         }).dropna()
-        paxg_4h = add_indicators(paxg_4h)
+        paxg_4h = process_data_smart(paxg_4h)
 
     except Exception as e:
         st.error(f"Error Data: {e}")
         return pd.DataFrame(), pd.DataFrame(), 16800
         
-    return paxg_d, paxg_4h, kurs
+    # Return paxg_6mo (Data potong) bukan paxg_d (Data full)
+    return paxg_6mo, paxg_4h, kurs
 
 def send_telegram_alert(token, chat_id, message):
     if not token or not chat_id: return False, "Token/ID Kosong"
@@ -145,55 +151,51 @@ def send_telegram_alert(token, chat_id, message):
     except Exception as e:
         return False, str(e)
 
-# --- REPORT GENERATOR (UPDATED WITH EMA 200) ---
-def generate_sop_report(df_d, df_4h, kurs):
-    last_d = df_d.iloc[-1]
+# --- REPORT GENERATOR ---
+def generate_sop_report(df_6mo, df_4h, kurs):
+    # Gunakan data 6 bulan untuk analisa Fibo & POC
+    last_d = df_6mo.iloc[-1]
     last_4h = df_4h.iloc[-1]
     
-    # 1. TENTUKAN SKENARIO
-    is_swinger = (last_d['Close'] > last_d['BBU']) or (last_d['STOCHRSIk'] > 80)
+    fibo = calculate_fibonacci_levels(df_6mo) # Fibo akurat range 6 bulan
+    poc = get_poc(df_6mo) # POC akurat range 6 bulan
     
-    fibo = calculate_fibonacci_levels(df_d)
-    poc = get_poc(df_d)
+    # 1. MATRIX 5+1 STATUS
     
-    # --- MATRIX 5+1 STATUS ---
-    
-    # 0. EMA 200 (The King)
+    # EMA 200 (Nilainya sudah terbawa dari perhitungan 2 tahun)
     ema200 = last_d['EMA200']
     price = last_d['Close']
-    if price > ema200: ema_stat = "🟢 UPTREND (Bullish)"
-    else: ema_stat = "🔴 DOWNTREND (Bearish)"
+    if price > ema200: ema_stat = "🟢 UPTREND"
+    else: ema_stat = "🔴 DOWNTREND"
 
-    # 1. Stoch RSI
+    # Stoch RSI
     stoch_val = last_d['STOCHRSIk']
     if stoch_val > 80: st_stat = "🔴 OVERBOUGHT"
     elif stoch_val < 20: st_stat = "🟢 OVERSOLD"
     else: st_stat = "⚪ NEUTRAL"
     
-    # 2. MACD
-    macd_val = last_d['MACD']
-    sig_val = last_d['MACD_Signal']
-    if macd_val > sig_val: mac_stat = "🟢 BULLISH"
+    # MACD
+    if last_d['MACD'] > last_d['MACD_Signal']: mac_stat = "🟢 BULLISH"
     else: mac_stat = "🔴 BEARISH"
     
-    # 3. VPVR
+    # VPVR
     if last_d['Close'] > poc: vp_stat = "🟢 STRONG (Above POC)"
     else: vp_stat = "🔴 WEAK (Below POC)"
     
-    # 4. Bollinger
-    bb_upper = last_d['BBU']
-    bb_lower = last_d['BBL']
-    if last_d['Close'] >= bb_upper: bb_stat = "🔴 AT UPPER BAND"
-    elif last_d['Close'] <= bb_lower: bb_stat = "🟢 AT LOWER BAND"
+    # Bollinger
+    if last_d['Close'] >= last_d['BBU']: bb_stat = "🔴 BREAKOUT UPPER"
+    elif last_d['Close'] <= last_d['BBL']: bb_stat = "🟢 BREAKOUT LOWER"
     else: bb_stat = "⚪ INSIDE BANDS"
     
-    # 5. Fibo
+    # Fibo
     dist_gold = last_d['Close'] - fibo['GOLDEN (0.618)']
     if abs(dist_gold) < 20: fib_stat = "⚠️ TESTING GOLDEN"
     elif dist_gold > 0: fib_stat = "⚪ ABOVE SUPPORT"
     else: fib_stat = "🟢 DISCOUNT AREA"
 
-    # --- KEPUTUSAN SOP ---
+    # 2. DECISION LOGIC (SOP TANGGAL 25)
+    is_swinger = (price > last_d['BBU']) or (stoch_val > 80)
+    
     if is_swinger:
         decision = "🚨 SKENARIO 1: SWINGER MODE"
         validation = "Pasar Gejolak / Pucuk. TAHAN CASH."
@@ -201,18 +203,15 @@ def generate_sop_report(df_d, df_4h, kurs):
 1. JANGAN MASUK DULU.
 2. Pantau Stoch RSI 4H (Saat ini: {last_4h['STOCHRSIk']:.1f}).
 3. Tunggu Stoch 4H < 20 baru MARKET ORDER.
-4. Jual Sebagian Aset Lama jika kena ${fibo['MOONBAG (1.618)']:.2f}
         """
     else:
         decision = "✅ SKENARIO 2: INVESTOR MODE"
         validation = "Pasar Stabil / Diskon. MASUK."
         
-        # Hitung Split
         dana_market = MODAL_GAJI * 0.5
         dana_limit = MODAL_GAJI * 0.5
         
-        # Target Limit: Max(POC, Fibo 0.618) tapi di bawah harga skrg
-        # Tambahan: EMA 200 juga bisa jadi support kuat
+        # Target Limit: Prioritaskan Support Terkuat di Bawah Harga
         candidates = [poc, fibo['GOLDEN (0.618)'], ema200]
         valid_supports = [x for x in candidates if x < price]
         
@@ -221,7 +220,7 @@ def generate_sop_report(df_d, df_4h, kurs):
         else:
             limit_target = fibo['MID (0.5)'] # Fallback
 
-        est_market = dana_market / (last_d['Close'] * kurs * SPREAD_AJAIB)
+        est_market = dana_market / (price * kurs * SPREAD_AJAIB)
         est_limit_idr = limit_target * kurs * SPREAD_AJAIB
         
         action_txt = f"""
@@ -230,41 +229,36 @@ def generate_sop_report(df_d, df_4h, kurs):
 
 2. LIMIT ORDER (50%): Rp {dana_limit:,.0f}
    @ Harga ${limit_target:.2f} (Est. IDR: {fmt_idr(est_limit_idr)})
-   *(Target di Support Terkuat: EMA200/POC/Fibo)*
-   
-3. HOLD SELAMANYA (Akumulasi).
+   *(Target: EMA200/POC/Fibo)*
         """
 
     now = datetime.now(pytz.timezone('Asia/Jakarta'))
     
-    report = f"""GOLD INVESTMENT REPORT
+    report = f"""GOLD INVESTMENT REPORT (SMART SLICE)
 📅 Waktu: {now.strftime('%d %b %Y | %H:%M WIB')}
 ============================================================
 
 💰 UPDATE HARGA (PAXG)
 💵 KURS USD/IDR : {fmt_idr(kurs)}
 ------------------------------------------------------------
-💎 PAXG/USD      : {fmt_usd(last_d['Close'])}
-💎 EMA 200       : {fmt_usd(ema200)} ({ema_stat.split()[1]})
-💎 PAXG/IDR      : {fmt_idr(last_d['Close'] * kurs)}
-   *(Est. Ajaib    : {fmt_idr(last_d['Close'] * kurs * SPREAD_AJAIB)})*
+💎 PAXG/USD      : {fmt_usd(price)}
+💎 EMA 200       : {fmt_usd(ema200)}
+💎 PAXG/IDR      : {fmt_idr(price * kurs)}
 ------------------------------------------------------------
 
-📊 HASIL ANALISIS (MATRIX 6 INDIKATOR)
+📊 MATRIX 6 INDIKATOR
 1. EMA 200     [{ema_stat}]
    👉 Price ${price:.0f} vs EMA ${ema200:.0f}
 
 2. Stoch RSI   [{st_stat}]
-   👉 Value: {stoch_val:.2f} (D: {last_d['STOCHRSId']:.2f})
+   👉 Value: {stoch_val:.2f}
 
 3. MACD        [{mac_stat}]
-   👉 Histogram: {macd_val - sig_val:.4f}
 
 4. VPVR POC    [{vp_stat}]
-   👉 POC Price: ${poc:.2f}
+   👉 POC Price: ${poc:.2f} (Area 6 Bulan)
 
 5. Bollinger   [{bb_stat}]
-   👉 Upper: ${bb_upper:.2f} | Lower: ${bb_lower:.2f}
 
 6. Fibonacci   [{fib_stat}]
    👉 Golden Pkt: ${fibo['GOLDEN (0.618)']:.2f}
@@ -277,27 +271,25 @@ def generate_sop_report(df_d, df_4h, kurs):
 📝 INSTRUKSI EKSEKUSI (MODAL 5 JUTA):
 {action_txt}
 
-🎯 MAPPING AREA (SORTED BY PRICE)
+🎯 MAPPING AREA (DATA 6 BULAN)
 """
-    # ✅ SORTING DISINI
     sorted_fibo = dict(sorted(fibo.items(), key=lambda item: item[1], reverse=True))
-
     for name, val in sorted_fibo.items():
         paxg_idr = val * kurs * SPREAD_AJAIB
         report += f"{name:<20} : {fmt_usd(val)} | {fmt_idr(paxg_idr)}\n"
 
-    return report, df_d, fibo, is_swinger
+    return report, df_6mo, fibo, is_swinger
 
 # --- MAIN APP ---
-st.title("Gold Investment Guide (EMA 200 Enhanced)")
+st.title("Gold Master Guide (EMA 200 + 6 Mo Focus)")
 
-with st.spinner("Menganalisa Data SOP (2 Tahun History)..."):
-    df_d, df_4h, kurs_val = get_data_engine()
+with st.spinner("Processing Data (2 Years Fetch -> 6 Months Slice)..."):
+    df_6mo, df_4h, kurs_val = get_data_engine()
     
-    if df_d.empty:
+    if df_6mo.empty:
         st.error("Gagal Data.")
     else:
-        final_report, xau_processed, fib_levels, mode_swinger = generate_sop_report(df_d, df_4h, kurs_val)
+        final_report, xau_processed, fib_levels, mode_swinger = generate_sop_report(df_6mo, df_4h, kurs_val)
 
         # --- SIDEBAR ---
         st.sidebar.header("⚙️ Konfigurasi")
@@ -309,33 +301,28 @@ with st.spinner("Menganalisa Data SOP (2 Tahun History)..."):
             chat_id = st.sidebar.text_input("Chat ID")
 
         st.sidebar.markdown("---")
-        # Visual Indikator Mode
         if mode_swinger:
-            st.sidebar.error("🚨 MODE SWINGER (WAIT)")
+            st.sidebar.error("🚨 MODE SWINGER")
         else:
-            st.sidebar.success("✅ MODE INVESTOR (BUY)")
+            st.sidebar.success("✅ MODE INVESTOR")
             
         st.sidebar.metric("PAXG/USD", fmt_usd(xau_processed.iloc[-1]['Close']))
         st.sidebar.metric("EMA 200", fmt_usd(xau_processed.iloc[-1]['EMA200']))
 
-        # --- CHART ---
-        st.subheader("📊 Chart Daily (6 Bulan) + EMA 200, Fibo & BB")
+        # --- CHART (Hanya Menampilkan 6 Bulan Terakhir) ---
+        st.subheader("📊 Chart Daily (Fokus 6 Bulan Terakhir)")
         
-        # Default zoom chart hanya 6 bulan terakhir biar enak dilihat
-        # Tapi data asli tetap 2 tahun buat EMA
-        chart_view = xau_processed.tail(180) 
-        
-        fig = go.Figure(data=[go.Candlestick(x=chart_view.index,
-                                open=chart_view['Open'], high=chart_view['High'],
-                                low=chart_view['Low'], close=chart_view['Close'],
+        fig = go.Figure(data=[go.Candlestick(x=xau_processed.index,
+                                open=xau_processed['Open'], high=xau_processed['High'],
+                                low=xau_processed['Low'], close=xau_processed['Close'],
                                 name='PAXG/USD')])
         
-        # BB Lines
-        fig.add_trace(go.Scatter(x=chart_view.index, y=chart_view['BBU'], line=dict(color='red', width=1, dash='dot'), name='Upper BB'))
-        fig.add_trace(go.Scatter(x=chart_view.index, y=chart_view['BBL'], line=dict(color='green', width=1, dash='dot'), name='Lower BB'))
+        # EMA 200 (Garis Biru)
+        fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['EMA200'], line=dict(color='blue', width=2), name='EMA 200'))
         
-        # EMA 200 (Blue Line) - NEW!
-        fig.add_trace(go.Scatter(x=chart_view.index, y=chart_view['EMA200'], line=dict(color='blue', width=2), name='EMA 200 (Trend)'))
+        # BB Lines
+        fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['BBU'], line=dict(color='red', width=1, dash='dot'), name='Upper BB'))
+        fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['BBL'], line=dict(color='green', width=1, dash='dot'), name='Lower BB'))
         
         # Fibo Lines
         colors = {"MOONBAG": "lime", "RESISTANCE": "red", "GOLDEN": "gold", "FLOOR": "white", "MID": "gray"}
