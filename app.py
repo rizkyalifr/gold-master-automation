@@ -125,7 +125,6 @@ def get_data_engine():
         paxg_d = process_data_smart(paxg_d)
         
         # 3. POTONG DATA JADI 6 BULAN (SLICING) -> BUAT FIBO & VPVR
-        # Kita ambil 180 candle terakhir (estimasi 6 bulan hari kalender / trading days)
         paxg_6mo = paxg_d.tail(180).copy()
         
         # Resample Hourly ke 4H
@@ -138,7 +137,6 @@ def get_data_engine():
         st.error(f"Error Data: {e}")
         return pd.DataFrame(), pd.DataFrame(), 16800
         
-    # Return paxg_6mo (Data potong) bukan paxg_d (Data full)
     return paxg_6mo, paxg_4h, kurs
 
 def send_telegram_alert(token, chat_id, message):
@@ -151,43 +149,36 @@ def send_telegram_alert(token, chat_id, message):
     except Exception as e:
         return False, str(e)
 
-# --- REPORT GENERATOR ---
+# --- REPORT GENERATOR (ADJUSTED FOR 100/100 LOGIC) ---
 def generate_sop_report(df_6mo, df_4h, kurs):
     # Gunakan data 6 bulan untuk analisa Fibo & POC
     last_d = df_6mo.iloc[-1]
     last_4h = df_4h.iloc[-1]
     
-    fibo = calculate_fibonacci_levels(df_6mo) # Fibo akurat range 6 bulan
-    poc = get_poc(df_6mo) # POC akurat range 6 bulan
+    fibo = calculate_fibonacci_levels(df_6mo) 
+    poc = get_poc(df_6mo) 
     
-    # 1. MATRIX 5+1 STATUS
-    
-    # EMA 200 (Nilainya sudah terbawa dari perhitungan 2 tahun)
+    # 1. MATRIX 6 INDIKATOR
     ema200 = last_d['EMA200']
     price = last_d['Close']
     if price > ema200: ema_stat = "🟢 UPTREND"
     else: ema_stat = "🔴 DOWNTREND"
 
-    # Stoch RSI
     stoch_val = last_d['STOCHRSIk']
     if stoch_val > 80: st_stat = "🔴 OVERBOUGHT"
     elif stoch_val < 20: st_stat = "🟢 OVERSOLD"
     else: st_stat = "⚪ NEUTRAL"
     
-    # MACD
     if last_d['MACD'] > last_d['MACD_Signal']: mac_stat = "🟢 BULLISH"
     else: mac_stat = "🔴 BEARISH"
     
-    # VPVR
     if last_d['Close'] > poc: vp_stat = "🟢 STRONG (Above POC)"
     else: vp_stat = "🔴 WEAK (Below POC)"
     
-    # Bollinger
     if last_d['Close'] >= last_d['BBU']: bb_stat = "🔴 BREAKOUT UPPER"
     elif last_d['Close'] <= last_d['BBL']: bb_stat = "🟢 BREAKOUT LOWER"
     else: bb_stat = "⚪ INSIDE BANDS"
     
-    # Fibo
     dist_gold = last_d['Close'] - fibo['GOLDEN (0.618)']
     if abs(dist_gold) < 20: fib_stat = "⚠️ TESTING GOLDEN"
     elif dist_gold > 0: fib_stat = "⚪ ABOVE SUPPORT"
@@ -211,14 +202,21 @@ def generate_sop_report(df_6mo, df_4h, kurs):
         dana_market = MODAL_GAJI * 0.5
         dana_limit = MODAL_GAJI * 0.5
         
-        # Target Limit: Prioritaskan Support Terkuat di Bawah Harga
-        candidates = [poc, fibo['GOLDEN (0.618)'], ema200]
+        # --- LOGIC 100/100: SMART AGGRESSIVE LIMIT ---
+        # Masukkan SEMUA level support potensial termasuk Fibo 0.382 & 0.5
+        candidates = [
+            poc, 
+            ema200, 
+            fibo['0.382 (Shallow)'], # Biar gak ketinggalan kalau trend kuat
+            fibo['MID (0.5)'], 
+            fibo['GOLDEN (0.618)']
+        ]
+        
+        # Ambil support TERTINGGI yang masih di bawah harga sekarang
         valid_supports = [x for x in candidates if x < price]
         
-        if valid_supports:
-            limit_target = max(valid_supports)
-        else:
-            limit_target = fibo['MID (0.5)'] # Fallback
+        if valid_supports: limit_target = max(valid_supports)
+        else: limit_target = fibo['MID (0.5)'] # Fallback
 
         est_market = dana_market / (price * kurs * SPREAD_AJAIB)
         est_limit_idr = limit_target * kurs * SPREAD_AJAIB
@@ -229,12 +227,12 @@ def generate_sop_report(df_6mo, df_4h, kurs):
 
 2. LIMIT ORDER (50%): Rp {dana_limit:,.0f}
    @ Harga ${limit_target:.2f} (Est. IDR: {fmt_idr(est_limit_idr)})
-   *(Target: EMA200/POC/Fibo)*
+   *(Target: Support Terdekat 0.382/0.5/POC/EMA)*
         """
 
     now = datetime.now(pytz.timezone('Asia/Jakarta'))
     
-    report = f"""GOLD INVESTMENT REPORT (SMART SLICE)
+    report = f"""🦅 GOLD MASTER GUIDE (EMA 200 + SMART AGGRESSIVE)
 📅 Waktu: {now.strftime('%d %b %Y | %H:%M WIB')}
 ============================================================
 
@@ -309,7 +307,7 @@ with st.spinner("Processing Data (2 Years Fetch -> 6 Months Slice)..."):
         st.sidebar.metric("PAXG/USD", fmt_usd(xau_processed.iloc[-1]['Close']))
         st.sidebar.metric("EMA 200", fmt_usd(xau_processed.iloc[-1]['EMA200']))
 
-        # --- CHART (Hanya Menampilkan 6 Bulan Terakhir) ---
+        # --- CHART ---
         st.subheader("📊 Chart Daily (Fokus 6 Bulan Terakhir)")
         
         fig = go.Figure(data=[go.Candlestick(x=xau_processed.index,
@@ -317,14 +315,11 @@ with st.spinner("Processing Data (2 Years Fetch -> 6 Months Slice)..."):
                                 low=xau_processed['Low'], close=xau_processed['Close'],
                                 name='PAXG/USD')])
         
-        # EMA 200 (Garis Biru)
         fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['EMA200'], line=dict(color='blue', width=2), name='EMA 200'))
         
-        # BB Lines
         fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['BBU'], line=dict(color='red', width=1, dash='dot'), name='Upper BB'))
         fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['BBL'], line=dict(color='green', width=1, dash='dot'), name='Lower BB'))
         
-        # Fibo Lines
         colors = {"MOONBAG": "lime", "RESISTANCE": "red", "GOLDEN": "gold", "FLOOR": "white", "MID": "gray"}
         for label, val in fib_levels.items():
             c = "gray"
