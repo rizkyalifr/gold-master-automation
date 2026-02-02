@@ -6,8 +6,7 @@ from datetime import datetime
 import pytz
 
 # --- KONFIGURASI ENGINE ---
-TICKER_PAXG = "PAXG-USD" 
-TICKER_IDR = "IDR=X"
+TICKERS = ["PAXG-USD", "IDR=X"]
 MODAL_GAJI = 5000000 
 SPREAD_AJAIB = 1.015 
 PAXG_MULTIPLIER = 0.99048968
@@ -79,52 +78,40 @@ def calculate_fibonacci_levels(df):
     }
     return levels
 
-# --- FETCH KURS (FIXED) ---
-def get_kurs_idr():
-    try:
-        idr_df = yf.download(TICKER_IDR, period="1d", progress=False)
-        if not idr_df.empty:
-            kurs = idr_df['Close'].iloc[-1]
-            if isinstance(kurs, pd.Series): kurs = kurs.item()
-            if pd.isna(kurs) or kurs < 10000: return 16500.0
-            return float(kurs)
-        else: return 16500.0
-    except: return 16500.0
-
 # --- DATA ENGINE (SMART SLICING) ---
 def get_data_engine():
-    # 1. Ambil Kurs
-    kurs = get_kurs_idr()
-    print(f"⏳ Mengambil Data Market (2 Tahun untuk EMA -> Slice 6 Bulan)... Kurs: {fmt_idr(kurs)}")
-
+    print("⏳ Mengambil Data Market (2 Tahun untuk EMA -> Slice 6 Bulan)...")
+    
     try:
-        # 2. Fetch 2 TAHUN (Untuk EMA 200)
-        df_full = yf.download(TICKER_PAXG, period="2y", interval="1d", progress=False)
+        # 1. Fetch 2 TAHUN (Untuk EMA 200)
+        df_full = yf.download(TICKERS, period="2y", interval="1d", group_by='ticker', progress=False)
         # Fetch 1 Bulan Hourly (Untuk Swinger Check)
-        df_hourly = yf.download(TICKER_PAXG, period="1mo", interval="1h", progress=False)
+        df_hourly = yf.download(TICKERS, period="1mo", interval="1h", group_by='ticker', progress=False)
         
         if df_full.empty or df_hourly.empty:
             print("❌ Gagal Download Data PAXG")
-            return pd.DataFrame(), pd.DataFrame(), kurs
+            return pd.DataFrame(), pd.DataFrame(), 16500.0
 
-        paxg_d = df_full
-        paxg_h = df_hourly
+        if isinstance(df_full.columns, pd.MultiIndex):
+            paxg_d = df_full['PAXG-USD'].dropna()
+            paxg_h = df_hourly['PAXG-USD'].dropna()
+            kurs = df_full['IDR=X']['Close'].iloc[-1]
+        else:
+            print("❌ Struktur Data Salah")
+            return pd.DataFrame(), pd.DataFrame(), 16500.0
 
-        # Fix MultiIndex
-        if isinstance(paxg_d.columns, pd.MultiIndex): paxg_d.columns = paxg_d.columns.get_level_values(0)
-        if isinstance(paxg_h.columns, pd.MultiIndex): paxg_h.columns = paxg_h.columns.get_level_values(0)
-
-        # Kalibrasi
+        # Kalibrasi Harga User
         for df in [paxg_d, paxg_h]:
             df['Close'] *= PAXG_MULTIPLIER
             df['High'] *= PAXG_MULTIPLIER
             df['Low'] *= PAXG_MULTIPLIER
             df['Open'] *= PAXG_MULTIPLIER
 
-        # 3. HITUNG INDIKATOR DI DATA FULL (2 TAHUN)
+        # 2. HITUNG INDIKATOR DI DATA FULL (2 TAHUN) -> BIAR EMA VALID
         paxg_d = process_data_smart(paxg_d)
         
-        # 4. POTONG DATA JADI 6 BULAN (SLICING) -> BUAT FIBO & VPVR
+        # 3. POTONG DATA JADI 6 BULAN (SLICING) -> BUAT FIBO & VPVR
+        # Kita ambil 180 candle terakhir (estimasi 6 bulan hari kalender / trading days)
         paxg_6mo = paxg_d.tail(180).copy()
         
         # Resample Hourly ke 4H
@@ -137,7 +124,7 @@ def get_data_engine():
 
     except Exception as e:
         print(f"❌ Error Data Processing: {e}")
-        return pd.DataFrame(), pd.DataFrame(), kurs
+        return pd.DataFrame(), pd.DataFrame(), 16500.0
 
 # --- FUNGSI KIRIM TELEGRAM ---
 def send_telegram(token, chat_id, message):
@@ -150,7 +137,7 @@ def send_telegram(token, chat_id, message):
     except Exception as e:
         print(f"❌ Error Koneksi Telegram: {e}")
 
-# --- REPORT GENERATOR ---
+# --- REPORT GENERATOR (SYNCED WITH APP.PY) ---
 def generate_sop_report(df_6mo, df_4h, kurs):
     # Gunakan data 6 bulan untuk analisa Fibo & POC
     last_d = df_6mo.iloc[-1]
@@ -159,34 +146,54 @@ def generate_sop_report(df_6mo, df_4h, kurs):
     fibo = calculate_fibonacci_levels(df_6mo) 
     poc = get_poc(df_6mo) 
     
-    # 1. MATRIX 6 INDIKATOR
+    # 1. MATRIX 6 INDIKATOR (FULL QUANTITATIVE)
+    
+    # EMA 200
     ema200 = last_d['EMA200']
     price = last_d['Close']
     if price > ema200: ema_stat = "🟢 UPTREND"
     else: ema_stat = "🔴 DOWNTREND"
+    ema_dist_pct = ((price - ema200) / ema200) * 100
+    ema_txt = f"Price ${price:.0f} vs EMA ${ema200:.0f} (Diff: {ema_dist_pct:+.1f}%)"
 
-    stoch_val = last_d['STOCHRSIk']
-    if stoch_val > 80: st_stat = "🔴 OVERBOUGHT"
-    elif stoch_val < 20: st_stat = "🟢 OVERSOLD"
+    # Stoch RSI
+    stoch_k = last_d['STOCHRSIk']
+    stoch_d = last_d['STOCHRSId']
+    if stoch_k > 80: st_stat = "🔴 OVERBOUGHT"
+    elif stoch_k < 20: st_stat = "🟢 OVERSOLD"
     else: st_stat = "⚪ NEUTRAL"
+    stoch_txt = f"K: {stoch_k:.1f} | D: {stoch_d:.1f}"
     
-    if last_d['MACD'] > last_d['MACD_Signal']: mac_stat = "🟢 BULLISH"
+    # MACD
+    macd_line = last_d['MACD']
+    macd_sig = last_d['MACD_Signal']
+    hist = macd_line - macd_sig
+    if hist > 0: mac_stat = "🟢 BULLISH"
     else: mac_stat = "🔴 BEARISH"
+    mac_txt = f"Hist: {hist:+.2f} | Line: {macd_line:.2f}"
     
-    if last_d['Close'] > poc: vp_stat = "🟢 STRONG (Above POC)"
+    # VPVR
+    if price > poc: vp_stat = "🟢 STRONG (Above POC)"
     else: vp_stat = "🔴 WEAK (Below POC)"
+    vp_txt = f"Price ${price:.0f} vs POC ${poc:.0f}"
     
-    if last_d['Close'] >= last_d['BBU']: bb_stat = "🔴 BREAKOUT UPPER"
-    elif last_d['Close'] <= last_d['BBL']: bb_stat = "🟢 BREAKOUT LOWER"
+    # Bollinger
+    bbu = last_d['BBU']
+    bbl = last_d['BBL']
+    if price >= bbu: bb_stat = "🔴 BREAKOUT UPPER"
+    elif price <= bbl: bb_stat = "🟢 BREAKOUT LOWER"
     else: bb_stat = "⚪ INSIDE BANDS"
+    bb_txt = f"Upper: ${bbu:.0f} | Lower: ${bbl:.0f}"
     
-    dist_gold = last_d['Close'] - fibo['GOLDEN (0.618)']
+    # Fibo
+    dist_gold = price - fibo['GOLDEN (0.618)']
     if abs(dist_gold) < 20: fib_stat = "⚠️ TESTING GOLDEN"
     elif dist_gold > 0: fib_stat = "⚪ ABOVE SUPPORT"
     else: fib_stat = "🟢 DISCOUNT AREA"
+    fib_txt = f"Dist to Golden: ${dist_gold:+.1f} (Target: ${fibo['GOLDEN (0.618)']:.0f})"
 
     # 2. DECISION LOGIC (SOP TANGGAL 25)
-    is_swinger = (price > last_d['BBU']) or (stoch_val > 80)
+    is_swinger = (price > bbu) or (stoch_k > 80)
     
     if is_swinger:
         decision = "🚨 SKENARIO 1: SWINGER MODE"
@@ -204,16 +211,14 @@ def generate_sop_report(df_6mo, df_4h, kurs):
         dana_limit = MODAL_GAJI * 0.5
         
         # --- LOGIC 100/100: SMART AGGRESSIVE LIMIT ---
-        # Masukkan SEMUA level support potensial termasuk Fibo Dnagkal (0.382 & 0.5)
         candidates = [
             poc, 
             ema200, 
-            fibo['0.382 (Shallow)'], # Biar gak ketinggalan kalau trend kuat
+            fibo['0.382 (Shallow)'],
             fibo['MID (0.5)'], 
             fibo['GOLDEN (0.618)']
         ]
         
-        # Ambil support TERTINGGI yang masih di bawah harga sekarang
         valid_supports = [x for x in candidates if x < price]
         
         if valid_supports: limit_target = max(valid_supports)
@@ -233,7 +238,7 @@ def generate_sop_report(df_6mo, df_4h, kurs):
 
     now = datetime.now(pytz.timezone('Asia/Jakarta'))
     
-    report = f"""🦅 GOLD MASTER GUIDE (EMA 200 + SMART AGGRESSIVE)
+    report = f"""🦅 GOLD MASTER GUIDE (EMA 200 + QUANTITATIVE)
 📅 Waktu: {now.strftime('%d %b %Y | %H:%M WIB')}
 ============================================================
 
@@ -243,25 +248,26 @@ def generate_sop_report(df_6mo, df_4h, kurs):
 💎 PAXG/USD      : {fmt_usd(price)}
 💎 EMA 200       : {fmt_usd(ema200)}
 💎 PAXG/IDR      : {fmt_idr(price * kurs)}
-   *(Est. Ajaib    : {fmt_idr(price * kurs * SPREAD_AJAIB)})*
 ------------------------------------------------------------
 
-📊 MATRIX 6 INDIKATOR
+📊 MATRIX 6 INDIKATOR (QUANTITATIVE)
 1. EMA 200     [{ema_stat}]
-   👉 Price ${price:.0f} vs EMA ${ema200:.0f}
+   👉 {ema_txt}
 
 2. Stoch RSI   [{st_stat}]
-   👉 Value: {stoch_val:.2f}
+   👉 {stoch_txt}
 
 3. MACD        [{mac_stat}]
+   👉 {mac_txt}
 
 4. VPVR POC    [{vp_stat}]
-   👉 POC Price: ${poc:.2f} (Area 6 Bulan)
+   👉 {vp_txt}
 
 5. Bollinger   [{bb_stat}]
+   👉 {bb_txt}
 
 6. Fibonacci   [{fib_stat}]
-   👉 Golden Pkt: ${fibo['GOLDEN (0.618)']:.2f}
+   👉 {fib_txt}
 
 ============================================================
 🧠 KEPUTUSAN SOP : [ {decision} ]
@@ -273,9 +279,7 @@ def generate_sop_report(df_6mo, df_4h, kurs):
 
 🎯 MAPPING AREA (DATA 6 BULAN)
 """
-    # Sorting Harga dari Tertinggi ke Terendah
     sorted_fibo = dict(sorted(fibo.items(), key=lambda item: item[1], reverse=True))
-
     for name, val in sorted_fibo.items():
         paxg_idr = val * kurs * SPREAD_AJAIB
         report += f"{name:<20} : {fmt_usd(val)} | {fmt_idr(paxg_idr)}\n"
