@@ -6,13 +6,19 @@ from datetime import datetime
 import pytz
 
 # --- KONFIGURASI ENGINE ---
-TICKERS = ["PAXG-USD", "IDR=X"]
-MODAL_GAJI = 5000000  # 5 Juta Rupiah
+TICKER_PAXG = "PAXG-USD" # Download terpisah
+TICKER_IDR = "IDR=X"     # Download terpisah
+MODAL_GAJI = 5000000     # 5 Juta Rupiah
 SPREAD_AJAIB = 1.015 
 PAXG_MULTIPLIER = 0.99048968
 
-# --- HELPER FORMATTING ---
-def fmt_idr(val): return f"Rp {val:,.0f}".replace(",", ".")
+# --- HELPER FORMATTING (ANTI ERROR) ---
+def fmt_idr(val): 
+    # Cek jika value NaN atau invalid
+    if pd.isna(val) or val == float('inf'):
+        return "Rp 0"
+    return f"Rp {val:,.0f}".replace(",", ".")
+
 def fmt_usd(val): return f"${val:,.2f}"
 
 # --- FUNGSI INDIKATOR (PANDAS ONLY) ---
@@ -72,22 +78,60 @@ def calculate_fibonacci_levels(df):
     }
     return levels
 
-# --- DATA ENGINE (DUAL TIMEFRAME: 1D & 4H) ---
+# --- KHUSUS FETCH KURS (FIXED) ---
+def get_kurs_idr():
+    try:
+        # Download Kurs Saja (Hanya hari ini)
+        print("⏳ Mengambil Data Kurs IDR...")
+        idr_df = yf.download(TICKER_IDR, period="1d", progress=False)
+        
+        if not idr_df.empty:
+            # Ambil data terakhir
+            kurs = idr_df['Close'].iloc[-1]
+            
+            # Jika formatnya Series/item, ambil valuenya saja
+            if isinstance(kurs, pd.Series):
+                kurs = kurs.item()
+            
+            # Cek Validitas
+            if pd.isna(kurs) or kurs < 10000:
+                print("⚠️ Data Kurs Aneh/NaN. Pakai Fallback 16.800")
+                return 16800.0
+                
+            return float(kurs)
+        else:
+            print("⚠️ Data Kurs Kosong. Pakai Fallback 16.800")
+            return 16800.0
+            
+    except Exception as e:
+        print(f"⚠️ Error Ambil Kurs: {e}. Pakai Fallback 16.800")
+        return 16800.0 # Hardcode Aman
+
+# --- DATA ENGINE (DUAL TIMEFRAME) ---
 def get_data_engine():
-    print("⏳ Mengambil Data Market (6 Bulan Daily & 1 Bulan Hourly)...")
-    # Fetch 6 Bulan Daily (Big Picture)
-    df_daily = yf.download(TICKERS, period="6mo", interval="1d", group_by='ticker', progress=False)
-    # Fetch 1 Bulan Hourly (Untuk konversi ke 4H)
-    df_hourly = yf.download(TICKERS, period="1mo", interval="1h", group_by='ticker', progress=False)
+    # 1. Ambil Kurs Dulu (Terpisah)
+    kurs = get_kurs_idr()
+    print(f"✅ Kurs Terpakai: {fmt_idr(kurs)}")
+
+    print("⏳ Mengambil Data PAXG (6 Bulan Daily & 1 Bulan Hourly)...")
     
     try:
-        if isinstance(df_daily.columns, pd.MultiIndex):
-            paxg_d = df_daily['PAXG-USD'].dropna()
-            paxg_h = df_hourly['PAXG-USD'].dropna()
-            kurs = df_daily['IDR=X']['Close'].iloc[-1]
-        else:
-            print("❌ Gagal Format Data (MultiIndex Error)")
-            return pd.DataFrame(), pd.DataFrame(), 16800
+        # 2. Fetch PAXG Sendirian (Lebih Stabil)
+        df_daily = yf.download(TICKER_PAXG, period="6mo", interval="1d", progress=False)
+        df_hourly = yf.download(TICKER_PAXG, period="1mo", interval="1h", progress=False)
+        
+        if df_daily.empty or df_hourly.empty:
+            print("❌ Gagal Download Data PAXG")
+            return pd.DataFrame(), pd.DataFrame(), kurs
+
+        paxg_d = df_daily
+        paxg_h = df_hourly
+
+        # Fix MultiIndex Column issue (Yfinance update baru sering bikin ini)
+        if isinstance(paxg_d.columns, pd.MultiIndex):
+            paxg_d.columns = paxg_d.columns.get_level_values(0)
+        if isinstance(paxg_h.columns, pd.MultiIndex):
+            paxg_h.columns = paxg_h.columns.get_level_values(0)
 
         # Kalibrasi Harga User
         for df in [paxg_d, paxg_h]:
@@ -96,20 +140,20 @@ def get_data_engine():
             df['Low'] *= PAXG_MULTIPLIER
             df['Open'] *= PAXG_MULTIPLIER
 
-        # Indikator Daily
+        # Indikator
         paxg_d = add_indicators(paxg_d)
         
-        # Resample Hourly ke 4H & Indikator
+        # Resample Hourly ke 4H
         paxg_4h = paxg_h.resample('4h').agg({
             'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
         }).dropna()
         paxg_4h = add_indicators(paxg_4h)
+        
+        return paxg_d, paxg_4h, kurs
 
     except Exception as e:
         print(f"❌ Error Data Processing: {e}")
-        return pd.DataFrame(), pd.DataFrame(), 16800
-        
-    return paxg_d, paxg_4h, kurs
+        return pd.DataFrame(), pd.DataFrame(), kurs
 
 # --- FUNGSI KIRIM TELEGRAM ---
 def send_telegram(token, chat_id, message):
@@ -130,37 +174,31 @@ def generate_sop_report(df_d, df_4h, kurs):
     last_4h = df_4h.iloc[-1]
     
     # 1. TENTUKAN SKENARIO (DAILY)
-    # Syarat Swinger: Harga tembus Upper BB ATAU StochRSI Daily > 80
     is_swinger = (last_d['Close'] > last_d['BBU']) or (last_d['STOCHRSIk'] > 80)
     
     fibo = calculate_fibonacci_levels(df_d)
     poc = get_poc(df_d)
     
     # --- MATRIX 5-5 STATUS & ANGKA ---
-    # 1. Stoch RSI
     stoch_val = last_d['STOCHRSIk']
     if stoch_val > 80: st_stat = "🔴 OVERBOUGHT"
     elif stoch_val < 20: st_stat = "🟢 OVERSOLD"
     else: st_stat = "⚪ NEUTRAL"
     
-    # 2. MACD
     macd_val = last_d['MACD']
     sig_val = last_d['MACD_Signal']
     if macd_val > sig_val: mac_stat = "🟢 BULLISH"
     else: mac_stat = "🔴 BEARISH"
     
-    # 3. VPVR
     if last_d['Close'] > poc: vp_stat = "🟢 STRONG (Above POC)"
     else: vp_stat = "🔴 WEAK (Below POC)"
     
-    # 4. Bollinger
     bb_upper = last_d['BBU']
     bb_lower = last_d['BBL']
     if last_d['Close'] >= bb_upper: bb_stat = "🔴 AT UPPER BAND"
     elif last_d['Close'] <= bb_lower: bb_stat = "🟢 AT LOWER BAND"
     else: bb_stat = "⚪ INSIDE BANDS"
     
-    # 5. Fibo
     dist_gold = last_d['Close'] - fibo['GOLDEN (0.618)']
     if abs(dist_gold) < 20: fib_stat = "⚠️ TESTING GOLDEN"
     elif dist_gold > 0: fib_stat = "⚪ ABOVE SUPPORT"
@@ -184,11 +222,14 @@ def generate_sop_report(df_d, df_4h, kurs):
         dana_market = MODAL_GAJI * 0.5
         dana_limit = MODAL_GAJI * 0.5
         
-        # Target Limit: Max(POC, Fibo 0.618) tapi di bawah harga skrg
+        # Target Limit
         limit_target = max(poc, fibo['GOLDEN (0.618)'])
         if limit_target >= last_d['Close']: limit_target = fibo['MID (0.5)']
         
-        est_market = dana_market / (last_d['Close'] * kurs * SPREAD_AJAIB)
+        # Kalkulasi Estimasi (Anti NaN)
+        harga_paxg_idr = last_d['Close'] * kurs * SPREAD_AJAIB
+        est_market = dana_market / harga_paxg_idr if harga_paxg_idr > 0 else 0
+        
         est_limit_idr = limit_target * kurs * SPREAD_AJAIB
         
         action_txt = f"""
@@ -203,7 +244,7 @@ def generate_sop_report(df_d, df_4h, kurs):
 
     now = datetime.now(pytz.timezone('Asia/Jakarta'))
     
-    report = f"""🦅 GOLD MASTER SOP REPORT
+    report = f"""🦅 GOLD INVESTMENT GUIDE
 📅 Waktu: {now.strftime('%d %b %Y | %H:%M WIB')}
 ============================================================
 
@@ -241,7 +282,6 @@ def generate_sop_report(df_d, df_4h, kurs):
 
 🎯 MAPPING AREA (SORTED BY PRICE)
 """
-    # Sorting Harga dari Tertinggi ke Terendah
     sorted_fibo = dict(sorted(fibo.items(), key=lambda item: item[1], reverse=True))
 
     for name, val in sorted_fibo.items():
@@ -254,35 +294,30 @@ def generate_sop_report(df_d, df_4h, kurs):
 if __name__ == "__main__":
     print("🤖 Robot Start (SOP Tanggal 25 Mode)...")
     
-    # 1. Ambil Secrets dari Environment Variable
-    # Pastikan di VPS/Terminal sudah set: export TELEGRAM_TOKEN="xxxx" dst
+    # 1. Secrets
     try:
         TOKEN = os.environ.get("TELEGRAM_TOKEN")
         CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-        
-        # Fallback jika testing lokal (Optional, Hapus jika production)
-        if not TOKEN: 
-            print("⚠️ Token tidak ditemukan di Env, mode debug console only.")
     except KeyError:
-        print("❌ Error: Secrets TELEGRAM tidak ditemukan!")
+        pass
 
     # 2. Jalanin Analisis
     df_d, df_4h, kurs = get_data_engine()
     
     if df_d.empty:
-        print("❌ Data Kosong, skip.")
+        print("❌ Data PAXG Kosong. Sinyal Internet?")
     else:
         # 3. Generate Report
         final_report = generate_sop_report(df_d, df_4h, kurs)
         
-        # 4. Print ke Console (Untuk Log)
+        # 4. Print Log
         print("\n" + "="*50)
         print(final_report)
         print("="*50 + "\n")
 
-        # 5. Kirim ke Telegram
+        # 5. Kirim Telegram
         if TOKEN and CHAT_ID:
-            print("🚀 Mengirim Laporan ke Telegram...")
+            print("🚀 Mengirim ke Telegram...")
             send_telegram(TOKEN, CHAT_ID, final_report)
         else:
-            print("⚠️ Laporan tidak dikirim (Token Kosong).")
+            print("⚠️ Token Telegram Kosong / Tidak di-set di Environment Variable.")
