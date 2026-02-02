@@ -8,9 +8,9 @@ from datetime import datetime, timedelta
 import pytz
 
 # --- KONFIGURASI HALAMAN ---
-st.set_page_config(page_title="Gold Master Institutional V6", page_icon="🦅", layout="wide")
+st.set_page_config(page_title="Gold Master V6 Institutional", page_icon="🦅", layout="wide")
 
-# --- CSS ---
+# --- CSS FIX ---
 st.markdown("""
 <style>
     [data-testid="stMetricValue"] { font-size: 24px; }
@@ -38,28 +38,28 @@ PAXG_MULTIPLIER = 0.99048968
 def fmt_idr(val): return f"Rp {val:,.0f}".replace(",", ".")
 def fmt_usd(val): return f"${val:,.2f}"
 
-# --- FUNGSI INDIKATOR ---
+# --- FUNGSI INDIKATOR (V6: PLUS BB_WIDTH) ---
 def process_data_smart(df):
     df = df.copy()
     # 1. EMA 200
     df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
     
-    # 2. Bollinger Bands (Volatility Proxy)
+    # 2. Bollinger
     df['SMA20'] = df['Close'].rolling(window=20).mean()
     df['STD20'] = df['Close'].rolling(window=20).std()
     df['BBU'] = df['SMA20'] + (df['STD20'] * 2)
     df['BBL'] = df['SMA20'] - (df['STD20'] * 2)
     df['BBM'] = df['SMA20']
-    df['BB_Width'] = (df['BBU'] - df['BBL']) / df['BBM']
+    df['BB_Width'] = (df['BBU'] - df['BBL']) / df['BBM'] # Volatility Metric
     
-    # 3. MACD (Momentum)
+    # 3. MACD
     k = df['Close'].ewm(span=12, adjust=False).mean()
     d = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = k - d
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
     
-    # 4. Stoch RSI (Timing)
+    # 4. Stoch RSI
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -96,14 +96,14 @@ def calculate_fibonacci_levels(df):
         "FLOOR (Low)": low
     }
 
-# --- SCORING ENGINE ---
+# --- SCORING ENGINE (V6: DETAIL + FLAGS) ---
 def calculate_quant_score(row, prev_row, poc, fibo_golden):
     price = row['Close']
     scores = {}
     details = {}
     bullish_flags = 0
 
-    # 1. EMA 200 (Weight 30%)
+    # 1. EMA 200
     ema = row['EMA200']
     dist_pct = ((price - ema) / ema) * 100
     if dist_pct >= 12: score_ema = 100
@@ -112,19 +112,20 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden):
     elif 0 <= dist_pct < 4: score_ema = 55
     else: score_ema = 30 
     scores['EMA'] = score_ema
-    details['EMA'] = f"Price vs EMA ({dist_pct:+.1f}%)"
+    trend_txt = "BULLISH" if price > ema else "BEARISH"
+    details['EMA'] = f"{trend_txt} | Price ${price:.0f} vs EMA ${ema:.0f} ({dist_pct:+.1f}%)"
     if score_ema >= 55: bullish_flags += 1
 
-    # 2. VPVR POC (Weight 20%)
+    # 2. VPVR POC
     if price > poc: score_vpvr = 100 
     elif abs(price - poc)/poc < 0.03: score_vpvr = 60 
     else: score_vpvr = 30 
     scores['VPVR'] = score_vpvr
-    pos_txt = "Above" if price > poc else "Below"
-    details['VPVR'] = f"{pos_txt} Volume Wall"
+    pos_txt = "Above Wall" if price > poc else "Below Wall"
+    details['VPVR'] = f"{pos_txt} | POC: ${poc:.0f}"
     if score_vpvr >= 60: bullish_flags += 1
 
-    # 3. MACD (Weight 15%)
+    # 3. MACD
     hist = row['MACD_Hist']
     prev_hist = prev_row['MACD_Hist']
     if hist > 0 and hist > prev_hist: score_macd = 100
@@ -132,10 +133,10 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden):
     elif hist < 0 and hist > prev_hist: score_macd = 50
     else: score_macd = 30
     scores['MACD'] = score_macd
-    details['MACD'] = f"Hist: {hist:+.2f}"
+    details['MACD'] = f"Hist: {hist:+.2f} | Line: {row['MACD']:.1f} | Sig: {row['MACD_Signal']:.1f}"
     if score_macd >= 70: bullish_flags += 1
 
-    # 4. Stoch RSI (Weight 10%)
+    # 4. Stoch RSI
     k = row['STOCHRSIk']
     d = row['STOCHRSId']
     if k < 20 and k > d: score_stoch = 90
@@ -143,29 +144,28 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden):
     elif k > 80: score_stoch = 35
     else: score_stoch = 50
     scores['STOCH'] = score_stoch
-    details['STOCH'] = f"K: {k:.1f}"
+    details['STOCH'] = f"K: {k:.1f} | D: {d:.1f}"
     if score_stoch >= 65: bullish_flags += 1
 
-    # 5. Bollinger Bands (Weight 10%)
+    # 5. Bollinger
     if price <= row['BBL']: score_bb = 85
     elif price < row['BBM']: score_bb = 65
     elif price < row['BBU']: score_bb = 35
     else: score_bb = 20
     scores['BB'] = score_bb
-    details['BB'] = "Lower Half" if price < row['BBM'] else "Upper Half"
+    details['BB'] = f"Upper: ${row['BBU']:.0f} | Lower: ${row['BBL']:.0f}"
     if score_bb >= 65: bullish_flags += 1
 
-    # 6. Fibonacci (Weight 15%)
+    # 6. Fibonacci
     dist_fibo_pct = abs((price - fibo_golden) / fibo_golden) * 100
     if dist_fibo_pct <= 1.5: score_fibo = 90
     elif price > fibo_golden: score_fibo = 55
     elif price < fibo_golden * 0.95: score_fibo = 40
     else: score_fibo = 75
     scores['FIBO'] = score_fibo
-    details['FIBO'] = f"Dist Golden: {dist_fibo_pct:.1f}%"
+    details['FIBO'] = f"Dist to Golden: {dist_fibo_pct:.1f}% | Target: ${fibo_golden:.0f}"
     if score_fibo >= 55: bullish_flags += 1
 
-    # COMPOSITE SCORE
     final_score = (
         (scores['EMA'] * 0.30) + (scores['VPVR'] * 0.20) + (scores['MACD'] * 0.15) +
         (scores['STOCH'] * 0.10) + (scores['BB'] * 0.10) + (scores['FIBO'] * 0.15)
@@ -215,7 +215,7 @@ def send_telegram_alert(token, chat_id, message):
     except Exception as e:
         return False, str(e)
 
-# --- REPORT GENERATOR (V6: INSTITUTIONAL LOGIC) ---
+# --- REPORT GENERATOR (V6 LOGIC + V5 DETAIL) ---
 def generate_sop_report(df_6mo, df_4h, kurs):
     last_d = df_6mo.iloc[-1]
     prev_d = df_6mo.iloc[-2]
@@ -224,33 +224,29 @@ def generate_sop_report(df_6mo, df_4h, kurs):
     fibo = calculate_fibonacci_levels(df_6mo) 
     poc = get_poc(df_6mo)
     
-    # 1. QUANTITATIVE SCORE
+    # 1. QUANT SCORE
     final_score, scores, details, bullish_count = calculate_quant_score(last_d, prev_d, poc, fibo['GOLDEN (0.618)'])
     
-    # 2. MARKET REGIME & VOLATILITY (ISSUE #3 FIX)
+    # 2. MARKET REGIME & VOLATILITY (V6)
     ema_dist = ((price - last_d['EMA200']) / last_d['EMA200']) * 100
-    bb_width = last_d.get('BB_Width', 0.1) # Default 0.1 if calc fail
+    if ema_dist > 5: regime = "🐎 TRENDING BULLISH"
+    elif ema_dist < -5: regime = "🐻 TRENDING BEARISH"
+    else: regime = "🦀 RANGING / SIDEWAYS"
     
-    # Volatility Classification
+    bb_width = last_d.get('BB_Width', 0.1)
     is_high_vol = bb_width > 0.15
     vol_status = "⚡ HIGH VOLATILITY" if is_high_vol else "🌊 NORMAL/LOW VOL"
     
-    # 3. MOMENTUM DECAY CHECK (ISSUE #5 FIX)
-    momentum_decay = last_d['MACD_Hist'] < prev_d['MACD_Hist'] and last_d['MACD_Hist'] > 0
-    
-    # 4. SELL / EXIT LOGIC (LADDER SYSTEM - ISSUE #1 & #7 FIX)
-    # Priority: Risk Management > Profit Taking
+    # 3. SELL LOGIC (PARTIAL LADDER V6)
     action_type = "BUY"
     sell_reason = ""
     sell_pct = 0
+    momentum_decay = last_d['MACD_Hist'] < prev_d['MACD_Hist'] and last_d['MACD_Hist'] > 0
     
-    # Tier 1: Risk Exit (Score Hancur / Trend Broken)
     if final_score < 40: 
         action_type = "SELL"
         sell_reason = "Score < 40 (Defensive Exit)"
-        sell_pct = 50 # Jual separuh buat amanin cash
-        
-    # Tier 2: Technical Exit (Partial TP)
+        sell_pct = 50 
     elif price >= fibo['MOONBAG (1.618)']:
         action_type = "SELL"
         sell_reason = "Moonbag Target (1.618)"
@@ -261,17 +257,16 @@ def generate_sop_report(df_6mo, df_4h, kurs):
         sell_pct = 30
     elif price >= fibo['0.236'] and last_d['STOCHRSIk'] > 80:
         action_type = "SELL"
-        sell_reason = "Overbought at Resistance 0.236"
+        sell_reason = "Overbought at Resistance"
         sell_pct = 20
 
-    # 5. BUY LOGIC & SIZING (VOLATILITY ADJUSTED - ISSUE #3 FIX)
+    # 4. BUY LOGIC & SIZING (V6)
     dana_market = 0
     dana_limit = 0
     decision_title = ""
     prob_desc = ""
     
     if action_type == "BUY":
-        # Base Allocation based on Score (ISSUE #2 & #6 FIX)
         if final_score >= 80:
             alloc_market, alloc_limit = 0.7, 0.3
             decision_title = "🚀 AGGRESSIVE BUY"
@@ -284,23 +279,20 @@ def generate_sop_report(df_6mo, df_4h, kurs):
             alloc_market, alloc_limit = 0.2, 0.8
             decision_title = "⚠️ SNIPER ENTRY (WAIT DIP)"
             prob_desc = "Price Extended / Wait Pullback"
-        else: # Score 40-50 (Grey Area)
+        else: 
             alloc_market, alloc_limit = 0.0, 1.0
             decision_title = "🛡️ DEFENSIVE / WAIT"
             prob_desc = "Weak Structure"
 
-        # Volatility Adjustment (Institutional Rule)
         if is_high_vol and final_score >= 50:
-            # Kalau volatil tinggi, kurangi market order, perbesar limit (hindari slippage/whipsaw)
-            alloc_market *= 0.7 # Reduce market exposure
-            alloc_limit = 1.0 - alloc_market # Shift to limit
+            alloc_market *= 0.7 
+            alloc_limit = 1.0 - alloc_market 
             prob_desc += " (Vol Adjusted)"
 
         dana_market = MODAL_GAJI * alloc_market
         dana_limit = MODAL_GAJI * alloc_limit
 
-    # 6. SMART LIMIT TARGETING (ISSUE #2 FIX)
-    # Pilih support terdekat yg masuk akal, bukan cuma max()
+    # 5. SMART LIMIT (V6)
     candidates = [
         {'price': poc, 'label': 'POC'},
         {'price': last_d['EMA200'], 'label': 'EMA 200'},
@@ -308,14 +300,10 @@ def generate_sop_report(df_6mo, df_4h, kurs):
         {'price': fibo['MID (0.5)'], 'label': 'Fibo 0.5'},
         {'price': fibo['GOLDEN (0.618)'], 'label': 'Golden'}
     ]
-    
-    # Filter yang di bawah harga sekarang
     valid_supports = [c for c in candidates if c['price'] < price]
     
     if valid_supports:
-        # Sort by distance to current price (descending price)
         valid_supports.sort(key=lambda x: x['price'], reverse=True)
-        # Ambil yang terdekat (index 0)
         target_limit_usd = valid_supports[0]['price']
         target_label = valid_supports[0]['label']
     else:
@@ -324,15 +312,16 @@ def generate_sop_report(df_6mo, df_4h, kurs):
         
     est_limit_idr = target_limit_usd * kurs * SPREAD_AJAIB
 
-    # 7. CONSTRUCTION REPORT TEXT
+    # 6. TEXT REPORT
     now = datetime.now(pytz.timezone('Asia/Jakarta'))
+    agreement = f"{bullish_count}/6 Bullish"
     
     if action_type == "SELL":
         main_action_txt = f"""
 🚨 **SELL SIGNAL TRIGGERED**
 👉 **Action:** JUAL {sell_pct}% Posisi
 👉 **Alasan:** {sell_reason}
-👉 **Next:** Simpan Cash/USDT, tunggu Score membaik atau harga diskon.
+👉 **Next:** Simpan Cash, tunggu Score membaik.
         """
     else:
         main_action_txt = f"""
@@ -355,24 +344,25 @@ PAXG : {fmt_usd(price)}
 EMA  : {fmt_usd(last_d['EMA200'])}
 VOL  : {vol_status}
 
-📊 **SCORING ENGINE**
-Total Score: **{final_score:.1f} / 100**
-• EMA Trend  : {scores['EMA']}
-• Vol Profile: {scores['VPVR']}
-• Momentum   : {scores['MACD']}
-• Timing     : {scores['STOCH']}
-• Mean Rev   : {scores['BB']}
-• Valuation  : {scores['FIBO']}
+📊 **MATRIX 6 INDIKATOR**
+1. EMA 200    [{scores['EMA']}] {details['EMA']}
+2. VPVR POC   [{scores['VPVR']}] {details['VPVR']}
+3. MACD       [{scores['MACD']}] {details['MACD']}
+4. Stoch RSI  [{scores['STOCH']}] {details['STOCH']}
+5. Bollinger  [{scores['BB']}] {details['BB']}
+6. Fibonacci  [{scores['FIBO']}] {details['FIBO']}
 
-🧠 **DECISION MODULE**
-Status: **{decision_title}**
-Logic : {prob_desc}
+🧮 SCORE: {final_score:.1f}/100 | {agreement}
+🌍 REGIME: {regime}
+=======================================
+🧠 DECISION : [ {decision_title} ]
+🎲 LOGIC    : {prob_desc}
 =======================================
 
 📋 **EXECUTION PLAN (MODAL 5 JUTA)**
 {main_action_txt}
 
-🎯 **KEY LEVELS (FIBO + STRUCTURAL)**
+🎯 **KEY LEVELS**
 """
     sorted_fibo = dict(sorted(fibo.items(), key=lambda item: item[1], reverse=True))
     for k, v in sorted_fibo.items():
@@ -405,18 +395,20 @@ with st.spinner("Running Quant Engine..."):
         st.sidebar.metric("QUANT SCORE", f"{score_val:.1f}", delta="Strength", delta_color=score_color)
         st.sidebar.metric("PRICE", fmt_usd(xau_processed.iloc[-1]['Close']))
 
-        # Chart
+        # Chart (FULL V5 STYLE RESTORED)
         st.subheader("Institutional Chart View")
         fig = go.Figure(data=[go.Candlestick(x=xau_processed.index,
                                 open=xau_processed['Open'], high=xau_processed['High'],
                                 low=xau_processed['Low'], close=xau_processed['Close'],
                                 name='PAXG/USD')])
         
+        # EMA
         fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['EMA200'], line=dict(color='blue', width=2), name='EMA 200'))
+        # BB
         fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['BBU'], line=dict(color='red', width=1, dash='dot'), name='Upper BB'))
         fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['BBL'], line=dict(color='green', width=1, dash='dot'), name='Lower BB'))
         
-        # Fibo
+        # Fibo (RESTORED)
         colors_fib = {"MOONBAG": "lime", "RESISTANCE": "red", "GOLDEN": "gold", "FLOOR": "white", "MID": "gray"}
         for label, val in fib_levels.items():
             c = "gray"
