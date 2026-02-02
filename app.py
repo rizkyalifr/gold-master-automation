@@ -8,7 +8,7 @@ from datetime import datetime
 import pytz
 
 # --- KONFIGURASI HALAMAN ---
-st.set_page_config(page_title="Gold Master SOP 25", page_icon="🦅", layout="wide")
+st.set_page_config(page_title="Investment Guide", page_icon="🦅", layout="wide")
 
 # --- CSS FIX ---
 st.markdown("""
@@ -236,7 +236,7 @@ def generate_sop_report(df_d, df_4h, kurs):
    *(Est. Ajaib    : {fmt_idr(last_d['Close'] * kurs * SPREAD_AJAIB)})*
 ------------------------------------------------------------
 
-📊 HASIL ANALISIS (MATRIX 5-5)
+📊 HASIL ANALISIS
 1. Stoch RSI   [{st_stat}]
    👉 Value: {stoch_val:.2f} (D: {last_d['STOCHRSId']:.2f})
 
@@ -332,3 +332,4 @@ with st.spinner("Menganalisa Data SOP..."):
                 else: st.error(f"Gagal: {msg}")
 
         st.text_area("Report:", value=final_report, height=700, label_visibility="collapsed")
+
