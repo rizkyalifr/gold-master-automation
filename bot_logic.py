@@ -11,7 +11,7 @@ TICKER_PAXG = "PAXG-USD"
 TICKER_IDR = "IDR=X"
 MODAL_GAJI = 5000000 
 SPREAD_AJAIB = 1.015 
-PAXG_MULTIPLIER = 0.99048968 # Kalibrasi Balik lagi
+PAXG_MULTIPLIER = 0.99048968 
 
 # --- HELPER ---
 def fmt_idr(val): 
@@ -19,9 +19,9 @@ def fmt_idr(val):
     return f"Rp {val:,.0f}".replace(",", ".")
 def fmt_usd(val): return f"${val:,.2f}"
 
-# --- ENGINE 1: DATA YAHOO (REPLACEMENT) ---
+# --- ENGINE 1: DATA YAHOO ---
 def get_yahoo_data():
-    print("⏳ Mengambil Data Yahoo Finance (EMA 200 Friendly)...")
+    print("⏳ Mengambil Data Yahoo Finance...")
     
     # 1. Ambil KURS
     kurs = 16500.0
@@ -36,13 +36,13 @@ def get_yahoo_data():
         # 2. Ambil PAXG Daily (2 Tahun biar EMA 200 presisi)
         df_d = yf.download(TICKER_PAXG, period="2y", interval="1d", progress=False)
         
-        # 3. Ambil PAXG Hourly (1 Bulan untuk indikator pendek)
+        # 3. Ambil PAXG Hourly (1 Bulan)
         df_h = yf.download(TICKER_PAXG, period="1mo", interval="1h", progress=False)
         
         if df_d.empty or df_h.empty:
             return pd.DataFrame(), pd.DataFrame(), kurs
 
-        # Fix Column MultiIndex (Yfinance update issue)
+        # Fix Column MultiIndex
         for df in [df_d, df_h]:
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
@@ -68,7 +68,7 @@ def get_yahoo_data():
 def add_indicators(df):
     df = df.copy()
     
-    # 1. EMA 200 (The King Trend)
+    # 1. EMA 200
     df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
     
     # 2. Bollinger Bands
@@ -96,7 +96,7 @@ def add_indicators(df):
     
     return df
 
-# --- ENGINE 3: ANALISIS LEVEL ---
+# --- ENGINE 3: ANALISIS LEVEL (VPVR ADDED) ---
 def get_analysis_levels(df):
     if df.empty: return {}, 0
     
@@ -111,14 +111,14 @@ def get_analysis_levels(df):
         "BOTTOM (0.0)": low
     }
     
-    # POC
+    # POC (Point of Control) - THE VPVR LOGIC
     price_bins = pd.cut(df['Close'], bins=50)
     vpvr = df.groupby(price_bins, observed=True)['Volume'].sum()
     poc = vpvr.idxmax().mid
     
     return fibo, poc
 
-# --- CORE LOGIC: DYNAMIC DCA (SAME AS V3.0) ---
+# --- CORE LOGIC: DYNAMIC DCA ---
 def generate_strategy(df_d, df_4h, kurs):
     last = df_d.iloc[-1]
     fibo, poc = get_analysis_levels(df_d)
@@ -133,7 +133,7 @@ def generate_strategy(df_d, df_4h, kurs):
     is_oversold = last['STOCHRSIk'] < 20
     is_breakout = price > last['BBU']
     
-    # 2. MATRIX 5 STATUS
+    # 2. MATRIX 6 STATUS GENERATOR (Added VPVR)
     st_ema = "🟢 UPTREND" if is_uptrend else "🔴 DOWNTREND"
     val_ema = f"Price ${price:.0f} > EMA ${ema200:.0f}" if is_uptrend else f"Price ${price:.0f} < EMA ${ema200:.0f}"
     
@@ -148,35 +148,35 @@ def generate_strategy(df_d, df_4h, kurs):
     if last['MACD'] > last['MACD_Signal']: st_macd = "🟢 BULLISH"
     else: st_macd = "🔴 BEARISH"
     
+    # Fibo Check
     supports = [v for k,v in fibo.items() if v < price]
     nearest_support = max(supports) if supports else 0
     st_fibo = "⚪ ABOVE SUPPORT" if nearest_support > 0 else "⚠️ BOTTOM DISCOVERY"
+
+    # VPVR Check (New)
+    st_vpvr = "🟢 ABOVE POC (STRONG)" if price > poc else "🔴 BELOW POC (WEAK)"
     
-    # 3. DECISION ENGINE (THE +1)
+    # 3. DECISION ENGINE
     mode = ""
     split_market = 0 
     split_limit = 0  
     msg = ""
 
-    # Skenario 1: Strong Buy (Diskon)
     if is_oversold or price < last['BBL']:
         mode = "💎 STRONG BUY (DISCOUNT)"
         split_market, split_limit = 70, 30
         msg = "Indikator Jenuh Jual / Harga di Bawah BB."
 
-    # Skenario 2: Normal Uptrend
     elif is_uptrend and not is_overbought:
         mode = "✅ NORMAL DCA (UPTREND)"
         split_market, split_limit = 50, 50
         msg = "Tren Naik Sehat (Above EMA 200). Lanjut SOP."
 
-    # Skenario 3: Super Cycle (Ride Wave)
     elif is_uptrend and (is_overbought or is_breakout):
         mode = "🚀 RIDE THE WAVE (CAUTIOUS)"
         split_market, split_limit = 20, 80
         msg = "Pasar Panas (Overbought). Masuk dikit (20%), sisa antre bawah."
 
-    # Skenario 4: Bearish Rejection
     elif not is_uptrend and is_overbought:
         mode = "🛑 WAIT / DEFENSIVE"
         split_market, split_limit = 0, 100
@@ -191,7 +191,7 @@ def generate_strategy(df_d, df_4h, kurs):
     rp_market = MODAL_GAJI * (split_market / 100)
     rp_limit = MODAL_GAJI * (split_limit / 100)
     
-    # Target Limit
+    # Target Limit (Smart Support: Termasuk POC)
     candidates = [ema200, poc, fibo['GOLDEN (0.618)'], fibo['MID (0.5)']]
     valid_supports = [x for x in candidates if x < price]
     target_limit_usd = max(valid_supports) if valid_supports else price * 0.95
@@ -200,17 +200,17 @@ def generate_strategy(df_d, df_4h, kurs):
     # 4. FORMAT REPORT
     now = datetime.now(pytz.timezone('Asia/Jakarta'))
     
-    report = f"""🦅 GOLD MASTER ULTIMATE (V3.0 - YAHOO)
+    report = f"""🦅 GOLD MASTER ULTIMATE (V3.0)
 📅 {now.strftime('%d %b %Y | %H:%M WIB')}
-🌍 DATA: YAHOO FINANCE (ADJUSTED)
+🌍 DATA: YAHOO FINANCE
 =======================================
 
 💰 MARKET STATUS
 PAXG/USD : {fmt_usd(price)}
 KURS IDR : {fmt_idr(kurs)}
-EMA 200  : {fmt_usd(ema200)} (Trend Filter)
+EMA 200  : {fmt_usd(ema200)}
 
-📊 MATRIX 5 INDIKATOR (+1)
+📊 MATRIX 6 INDIKATOR (+1)
 1. EMA 200     [{st_ema}]
    👉 {val_ema}
 
@@ -223,7 +223,10 @@ EMA 200  : {fmt_usd(ema200)} (Trend Filter)
 4. MACD        [{st_macd}]
    👉 Hist: {last['MACD'] - last['MACD_Signal']:.2f}
 
-5. Fibonacci   [{st_fibo}]
+5. VPVR POC    [{st_vpvr}]
+   👉 Volume Wall: {fmt_usd(poc)}
+
+6. Fibonacci   [{st_fibo}]
    👉 Nearest Supp: {fmt_usd(nearest_support)}
 
 =======================================
@@ -244,6 +247,7 @@ EMA 200  : {fmt_usd(ema200)} (Trend Filter)
 
 =======================================
 🎯 LEVEL PENTING (DATA 2 TAHUN)
+POC (VPVR)     : {fmt_usd(poc)}
 """
     sorted_fibo = dict(sorted(fibo.items(), key=lambda item: item[1], reverse=True))
     for k, v in sorted_fibo.items():
@@ -259,26 +263,20 @@ def send_telegram(token, chat_id, message):
 
 # --- MAIN ---
 if __name__ == "__main__":
-    print("🚀 Starting Gold Master Ultimate (Yahoo)...")
+    print("🚀 Starting Gold Master Ultimate...")
     
-    # 1. Get Secrets
     TOKEN = os.environ.get("TELEGRAM_TOKEN")
     CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
     
-    # 2. Get Data
     df_d, df_4h, kurs = get_yahoo_data()
     
     if not df_d.empty:
-        # 3. Process
         df_d = add_indicators(df_d)
-        
-        # 4. Generate Strategy
         report = generate_strategy(df_d, df_4h, kurs)
         
         print("\n" + report + "\n")
         
         if TOKEN and CHAT_ID:
             send_telegram(TOKEN, CHAT_ID, report)
-            print("✅ Sent to Telegram.")
     else:
         print("❌ Gagal Fetch Yahoo Finance.")
