@@ -17,7 +17,7 @@ warnings.filterwarnings("ignore")
 TICKERS = ["PAXG-USD", "IDR=X"]
 MODAL_GAJI = 5000000 
 SPREAD_AJAIB = 1.015 
-PAXG_MULTIPLIER = 1.00326
+PAXG_MULTIPLIER = 0.99432278994
 
 # --- HELPER FORMATTING ---
 def fmt_idr(val): return f"Rp {val:,.0f}".replace(",", ".")
@@ -590,4 +590,5 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
+
 
