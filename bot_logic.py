@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 from scipy.optimize import minimize
 from scipy.signal import argrelextrema
@@ -21,8 +21,16 @@ SPREAD_AJAIB = 1.015
 PAXG_MULTIPLIER = 0.99048968
 
 # --- HELPER FORMATTING ---
-def fmt_idr(val): return f"Rp {val:,.0f}".replace(",", ".")
-def fmt_usd(val): return f"${val:,.2f}"
+def fmt_idr(val): 
+    # Force convert to float/int before formatting
+    try: val = float(val)
+    except: val = 0
+    return f"Rp {val:,.0f}".replace(",", ".")
+
+def fmt_usd(val): 
+    try: val = float(val)
+    except: val = 0
+    return f"${val:,.2f}"
 
 # ==========================================
 # 1. AI OPTIMIZATION ENGINE
@@ -181,7 +189,7 @@ def process_data_ai(df, params):
     df['STOCHRSIk'] = stoch.rolling(window=k_smooth).mean() * 100
     df['STOCHRSId'] = df['STOCHRSIk'].rolling(window=d_smooth).mean()
     
-    # Volatility (ATR Simple) for Human Report
+    # Volatility (ATR Simple)
     df['TR'] = np.maximum((df['High'] - df['Low']), 
                           np.maximum(abs(df['High'] - df['Close'].shift()), 
                                      abs(df['Low'] - df['Close'].shift())))
@@ -194,11 +202,11 @@ def get_poc(df):
     try:
         price_bins = pd.cut(df['Close'], bins=50)
         vpvr = df.groupby(price_bins, observed=True)['Volume'].sum()
-        return vpvr.idxmax().mid
-    except: return df['Close'].median()
+        return float(vpvr.idxmax().mid) # FORCE FLOAT
+    except: return float(df['Close'].median())
 
 def calculate_fibonacci_levels(df, anchors):
-    low, high = anchors
+    low, high = float(anchors[0]), float(anchors[1]) # FORCE FLOAT
     diff = high - low
     return {
         "MOONBAG (1.618)": high + (diff * 0.618),
@@ -216,13 +224,25 @@ def calculate_fibonacci_levels(df, anchors):
 # ==========================================
 
 def calculate_quant_score(row, prev_row, poc, fibo_golden, opt_params):
-    price = row['Close']
+    # FORCE FLOAT ALL INPUTS TO PREVENT SERIES FORMATTING ERROR
+    price = float(row['Close'])
+    ema = float(row['EMA200'])
+    bbu = float(row['BBU'])
+    bbl = float(row['BBL'])
+    bbm = float(row['BBM'])
+    hist = float(row['MACD_Hist'])
+    macd_line = float(row['MACD'])
+    macd_sig = float(row['MACD_Signal'])
+    k = float(row['STOCHRSIk'])
+    d = float(row['STOCHRSId'])
+    poc = float(poc)
+    fibo_golden = float(fibo_golden)
+
     scores = {}
     details = {}
     bullish_flags = 0
 
     # 1. EMA
-    ema = row['EMA200']
     dist_pct = ((price - ema) / ema) * 100
     if dist_pct >= 12: score_ema = 100
     elif 8 <= dist_pct < 12: score_ema = 85
@@ -242,8 +262,7 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden, opt_params):
     if score_vpvr >= 60: bullish_flags += 1
 
     # 3. MACD
-    hist = row['MACD_Hist']
-    prev_hist = prev_row['MACD_Hist']
+    prev_hist = float(prev_row['MACD_Hist'])
     if hist > 0 and hist > prev_hist: score_macd = 100
     elif hist > 0: score_macd = 70
     elif hist < 0 and hist > prev_hist: score_macd = 50
@@ -254,8 +273,6 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden, opt_params):
     if score_macd >= 70: bullish_flags += 1
 
     # 4. Stoch RSI
-    k = row['STOCHRSIk']
-    d = row['STOCHRSId']
     if k < 20 and k > d: score_stoch = 90
     elif k < 20: score_stoch = 65
     elif k > 80: score_stoch = 35
@@ -266,13 +283,13 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden, opt_params):
     if score_stoch >= 65: bullish_flags += 1
 
     # 5. Bollinger
-    if price <= row['BBL']: score_bb = 85
-    elif price < row['BBM']: score_bb = 65
-    elif price < row['BBU']: score_bb = 35
+    if price <= bbl: score_bb = 85
+    elif price < bbm: score_bb = 65
+    elif price < bbu: score_bb = 35
     else: score_bb = 20
     scores['BB'] = score_bb
     p = opt_params['BB']
-    details['BB'] = f"AI-BB({p[0]},{p[1]:.1f}) | Up: ${row['BBU']:.0f} | Low: ${row['BBL']:.0f}"
+    details['BB'] = f"AI-BB({p[0]},{p[1]:.1f}) | Up: ${bbu:.0f} | Low: ${bbl:.0f}"
     if score_bb >= 65: bullish_flags += 1
 
     # 6. Fibonacci
@@ -291,77 +308,54 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden, opt_params):
     )
     return final_score, scores, details, bullish_flags
 
-# --- DATA ENGINE (VERSI ANTI-GAGAL) ---
+# --- DATA FETCHING ---
 def get_data_engine():
     print("⏳ Connecting to Market Data...")
     
-    # 1. DOWNLOAD PAXG DAILY (2 Tahun)
+    # 1. Download PAXG Daily
     try:
         paxg_d = yf.download("PAXG-USD", period="2y", interval="1d", progress=False)
-        if paxg_d.empty:
-            print("   ❌ Gagal download PAXG Daily.")
-            return pd.DataFrame(), pd.DataFrame(), 16800, {}
-    except Exception as e:
-        print(f"   ❌ Error PAXG Daily: {e}")
-        return pd.DataFrame(), pd.DataFrame(), 16800, {}
+        if paxg_d.empty: return pd.DataFrame(), pd.DataFrame(), 16800, {}
+    except: return pd.DataFrame(), pd.DataFrame(), 16800, {}
 
-    # 2. DOWNLOAD PAXG HOURLY (1 Bulan) - Coba retry kalau gagal
+    # 2. Download PAXG Hourly (Retry Logic)
     try:
         paxg_h = yf.download("PAXG-USD", period="1mo", interval="1h", progress=False)
-        if paxg_h.empty:
-            print("   ⚠️ Gagal download PAXG Hourly (Skip hourly logic).")
-            # Fallback: Pakai data daily kalau hourly gagal
-            paxg_h = paxg_d.tail(30).copy() 
-    except:
-        paxg_h = paxg_d.tail(30).copy()
+        if paxg_h.empty: paxg_h = paxg_d.tail(30).copy()
+    except: paxg_h = paxg_d.tail(30).copy()
 
-    # 3. DOWNLOAD KURS IDR (Terpisah)
+    # 3. Download IDR
     try:
         idr_df = yf.download("IDR=X", period="1d", progress=False)
         if not idr_df.empty:
             kurs = idr_df['Close'].iloc[-1]
             if isinstance(kurs, pd.Series): kurs = kurs.iloc[0]
             kurs = float(kurs)
-        else:
-            kurs = 16800.0 # Fallback manual jika Yahoo error
-    except:
-        kurs = 16800.0
+        else: kurs = 16800.0
+    except: kurs = 16800.0
 
     print(f"   ✅ Data Loaded. Price: {fmt_usd(paxg_d['Close'].iloc[-1])} | IDR: {fmt_idr(kurs)}")
 
-    # 4. DATA PROCESSING
+    # 4. Processing
     try:
-        # Fix MultiIndex Columns (Masalah umum yfinance terbaru)
         if isinstance(paxg_d.columns, pd.MultiIndex):
             paxg_d.columns = paxg_d.columns.get_level_values(0)
         if isinstance(paxg_h.columns, pd.MultiIndex):
             paxg_h.columns = paxg_h.columns.get_level_values(0)
 
-        # Kalibrasi Harga User (Multiplier)
         cols = ['Close', 'High', 'Low', 'Open']
-        for col in cols:
-            if col in paxg_d.columns: paxg_d[col] = paxg_d[col] * PAXG_MULTIPLIER
-            if col in paxg_h.columns: paxg_h[col] = paxg_h[col] * PAXG_MULTIPLIER
-
-        # AI Optimization
+        for df in [paxg_d, paxg_h]:
+            for col in cols:
+                if col in df.columns:
+                    df[col] = df[col] * PAXG_MULTIPLIER
+        
         opt_data = paxg_d.tail(200).copy()
         ai_params = run_ai_optimizer(opt_data)
-
-        # Process Indicators
         paxg_d = process_data_ai(paxg_d, ai_params)
         paxg_6mo = paxg_d.tail(180).copy()
-        
-        # Hourly Processing
-        if not paxg_h.empty:
-            paxg_4h = paxg_h.resample('4h').agg({
-                'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'
-            }).dropna()
-            paxg_4h = process_data_ai(paxg_4h, ai_params)
-        else:
-            paxg_4h = paxg_d.tail(30) # Fallback
-
-        return paxg_6mo, paxg_4h, kurs, ai_params
-
+        paxg_4h = paxg_h.resample('4h').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
+        paxg_4h = process_data_ai(paxg_4h, ai_params)
+        return paxg_6mo, paxg_4h, float(kurs), ai_params
     except Exception as e:
         print(f"   ❌ Processing Error: {e}")
         return pd.DataFrame(), pd.DataFrame(), 16800, {}
@@ -375,11 +369,11 @@ def send_telegram_alert(token, chat_id, message):
         return True
     except: return False
 
-# --- NEW: HUMAN READABLE REPORT (PESAN KE-2) ---
+# --- HUMAN REPORT ---
 def generate_human_report(df_6mo, kurs, score, ai_params, poc, fibo):
     last_d = df_6mo.iloc[-1]
-    price = last_d['Close']
-    open_price = last_d['Open']
+    price = float(last_d['Close'])
+    open_price = float(last_d['Open'])
     
     if score >= 80: 
         confidence = "Sangat Tinggi (Strong Bullish) 🔥"
@@ -397,18 +391,16 @@ def generate_human_report(df_6mo, kurs, score, ai_params, poc, fibo):
     trend_icon = "📈" if price >= open_price else "📉"
     trend_txt = "mengalami kenaikan" if price >= open_price else "mengalami penurunan"
 
-    # Map Levels for Human Context
     levels = [
-        (last_d['BBU'], "Bollinger Atas"),
-        (poc, "Area Volume Padat"),
-        (fibo['RESISTANCE (High)'], "Puncak Tertinggi"),
-        (fibo['GOLDEN (0.618)'], "Fibo Golden"),
-        (fibo['0.382'], "Fibo 0.382"),
-        (fibo['MID (0.5)'], "Fibo 0.5"),
-        (last_d['EMA200'], "Garis Tren")
+        (float(last_d['BBU']), "Bollinger Atas"),
+        (float(poc), "Area Volume Padat"),
+        (float(fibo['RESISTANCE (High)']), "Puncak Tertinggi"),
+        (float(fibo['GOLDEN (0.618)']), "Fibo Golden"),
+        (float(fibo['0.382']), "Fibo 0.382"),
+        (float(fibo['MID (0.5)']), "Fibo 0.5"),
+        (float(last_d['EMA200']), "Garis Tren")
     ]
 
-    # Skenario Kenaikan
     resistances = sorted([x for x in levels if x[0] > price], key=lambda x: x[0])
     if resistances:
         next_res = resistances[0]
@@ -421,7 +413,6 @@ def generate_human_report(df_6mo, kurs, score, ai_params, poc, fibo):
     else:
         upside_txt = "sudah menembus semua atap (Breakout)! 🚀"
 
-    # Skenario Penurunan
     supports = sorted([x for x in levels if x[0] < price], key=lambda x: x[0], reverse=True)
     if supports:
         next_sup = supports[0]
@@ -431,7 +422,7 @@ def generate_human_report(df_6mo, kurs, score, ai_params, poc, fibo):
     else:
         downside_txt = "waspada, tidak ada penahan dekat di bawah."
 
-    atr = last_d.get('ATR', price * 0.01)
+    atr = float(last_d.get('ATR', price * 0.01))
     range_high = price + atr
     range_low = price - atr
     est_idr = price * kurs * SPREAD_AJAIB
@@ -457,19 +448,22 @@ Sebaliknya, jika terjadi koreksi, {downside_txt}
     """
     return msg
 
-# --- TECHNICAL REPORT GENERATOR (PESAN 1: STRICT FORMAT) ---
+# --- TECHNICAL REPORT (STRICT) ---
 def generate_sop_report(df_6mo, df_4h, kurs, ai_params):
     last_d = df_6mo.iloc[-1]
     prev_d = df_6mo.iloc[-2]
-    price = last_d['Close']
+    # FORCE FLOAT
+    price = float(last_d['Close'])
+    
     fibo = calculate_fibonacci_levels(df_6mo, ai_params['FIBO_ANCHORS']) 
     poc = get_poc(df_6mo)
     
     final_score, scores, details, bullish_count = calculate_quant_score(last_d, prev_d, poc, fibo['GOLDEN (0.618)'], ai_params)
     
-    ema_dist = ((price - last_d['EMA200']) / last_d['EMA200']) * 100
+    ema = float(last_d['EMA200'])
+    ema_dist = ((price - ema) / ema) * 100
     regime = "TRENDING BULLISH" if ema_dist > 5 else "TRENDING BEARISH" if ema_dist < -5 else "RANGING"
-    bb_width = last_d.get('BB_Width', 0.1)
+    bb_width = float(last_d.get('BB_Width', 0.1))
     is_high_vol = bb_width > 0.15
     vol_status = "HIGH VOLATILITY" if is_high_vol else "NORMAL VOLATILITY"
     
@@ -477,7 +471,8 @@ def generate_sop_report(df_6mo, df_4h, kurs, ai_params):
     sell_reason = ""
     sell_pct = 0
     momentum_decay = last_d['MACD_Hist'] < prev_d['MACD_Hist'] and last_d['MACD_Hist'] > 0
-    
+    k_stoch = float(last_d['STOCHRSIk'])
+
     if final_score < 40: 
         action_type = "SELL"
         sell_reason = "Score < 40 (Defensive)"
@@ -490,7 +485,7 @@ def generate_sop_report(df_6mo, df_4h, kurs, ai_params):
         action_type = "SELL"
         sell_reason = "Resist + Decay"
         sell_pct = 30
-    elif price >= fibo['0.236'] and last_d['STOCHRSIk'] > 80:
+    elif price >= fibo['0.236'] and k_stoch > 80:
         action_type = "SELL"
         sell_reason = "Overbought"
         sell_pct = 20
@@ -526,11 +521,11 @@ def generate_sop_report(df_6mo, df_4h, kurs, ai_params):
         dana_limit = MODAL_GAJI * alloc_limit
 
     candidates = [
-        {'price': poc, 'label': 'POC'},
-        {'price': last_d['EMA200'], 'label': f"EMA {ai_params['EMA']}"},
-        {'price': fibo['0.382'], 'label': 'Fibo 0.382'},
-        {'price': fibo['MID (0.5)'], 'label': 'Fibo 0.5'},
-        {'price': fibo['GOLDEN (0.618)'], 'label': 'Golden'}
+        {'price': float(poc), 'label': 'POC'},
+        {'price': float(last_d['EMA200']), 'label': f"EMA {ai_params['EMA']}"},
+        {'price': float(fibo['0.382']), 'label': 'Fibo 0.382'},
+        {'price': float(fibo['MID (0.5)']), 'label': 'Fibo 0.5'},
+        {'price': float(fibo['GOLDEN (0.618)']), 'label': 'Golden'}
     ]
     valid_supports = [c for c in candidates if c['price'] < price]
     if valid_supports:
@@ -558,23 +553,21 @@ def generate_sop_report(df_6mo, df_4h, kurs, ai_params):
     Target: {fmt_usd(target_limit_usd)} ({target_label})
     Est. IDR: {fmt_idr(est_limit_idr)}"""
 
-    # CONSTRUCTION OF THE REPORT STRING (STRICT FORMAT)
     report = f""" GOLD MASTER V6 (AI ENHANCED) {now.strftime('%d %b %Y | %H:%M WIB')}
 ======================================= **MARKET DATA**
 PAXG : {fmt_usd(price)}
-EMA  : {fmt_usd(last_d['EMA200'])} (Per: {ai_params['EMA']})
-VOL  : {vol_status} **MATRIX 6 INDIKATOR (AI OPTIMIZED)**
+EMA  : {fmt_usd(ema)} (Per: {ai_params['EMA']})
+VOL  :  {vol_status} **MATRIX 6 INDIKATOR (AI OPTIMIZED)**
 1. EMA       [{scores['EMA']}] {details['EMA']}
 2. VPVR POC  [{scores['VPVR']}] {details['VPVR']}
 3. MACD      [{scores['MACD']}] {details['MACD']}
 4. Stoch RSI [{scores['STOCH']}] {details['STOCH']}
 5. Bollinger [{scores['BB']}] {details['BB']}
-6. Fibonacci [{scores['FIBO']}] {details['FIBO']} SCORE: {final_score:.1f}/100 | {agreement} REGIME: {regime}
-======================================= DECISION : [ {decision_title} ] LOGIC    : {prob_desc}
+6. Fibonacci [{scores['FIBO']}] {details['FIBO']} SCORE: {final_score:.1f}/100 | {agreement} REGIME:  {regime}
+======================================= DECISION : [  {decision_title} ] LOGIC    : {prob_desc}
 ======================================= **EXECUTION PLAN (MODAL 5 JUTA)** {main_action_txt}
          **KEY LEVELS**
 """
-    # Append Key Levels
     sorted_fibo = dict(sorted(fibo.items(), key=lambda item: item[1], reverse=True))
     for k, v in sorted_fibo.items():
         report += f"{k:<15}: {fmt_usd(v)}\n"
@@ -593,10 +586,8 @@ def run_bot():
         print("❌ Critical Error: Data Empty.")
         return
 
-    # Generate Technical Report
+    # Generate Reports
     tech_report, score, fibo, poc = generate_sop_report(raw_d.tail(180), raw_d.tail(180), kurs, ai_params)
-    
-    # Generate Human Report (NEW)
     human_report = generate_human_report(raw_d.tail(180), kurs, score, ai_params, poc, fibo)
     
     print("\n" + tech_report)
@@ -607,12 +598,11 @@ def run_bot():
     
     if TOKEN and CHAT_ID:
         print("🚀 Sending 2 Messages to Telegram...")
-        send_telegram_alert(TOKEN, CHAT_ID, tech_report) # Pesan 1 (Teknis)
-        time.sleep(1) # Jeda dikit biar urutan bener
-        send_telegram_alert(TOKEN, CHAT_ID, human_report) # Pesan 2 (Manusia)
+        send_telegram_alert(TOKEN, CHAT_ID, tech_report)
+        time.sleep(1)
+        send_telegram_alert(TOKEN, CHAT_ID, human_report)
     else:
         print("⚠️ Skip Telegram.")
 
 if __name__ == "__main__":
     run_bot()
-
