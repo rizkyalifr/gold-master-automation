@@ -291,40 +291,79 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden, opt_params):
     )
     return final_score, scores, details, bullish_flags
 
-# --- DATA FETCHING ---
+# --- DATA ENGINE (VERSI ANTI-GAGAL) ---
 def get_data_engine():
     print("⏳ Connecting to Market Data...")
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            df_full = yf.download(TICKERS, period="2y", interval="1d", group_by='ticker', progress=False)
-            df_hourly = yf.download(TICKERS, period="1mo", interval="1h", group_by='ticker', progress=False)
-            if not df_full.empty and not df_hourly.empty: break
-        except Exception as e:
-            if attempt == max_retries - 1: return pd.DataFrame(), pd.DataFrame(), 16800, {}
-            time.sleep(1)
-
+    
+    # 1. DOWNLOAD PAXG DAILY (2 Tahun)
     try:
-        if isinstance(df_full.columns, pd.MultiIndex):
-            paxg_d = df_full['PAXG-USD'].dropna()
-            paxg_h = df_hourly['PAXG-USD'].dropna()
-            kurs = df_full['IDR=X']['Close'].iloc[-1]
-            if isinstance(kurs, pd.Series): kurs = kurs.iloc[0]
-        else: return pd.DataFrame(), pd.DataFrame(), 16800, {}
+        paxg_d = yf.download("PAXG-USD", period="2y", interval="1d", progress=False)
+        if paxg_d.empty:
+            print("   ❌ Gagal download PAXG Daily.")
+            return pd.DataFrame(), pd.DataFrame(), 16800, {}
+    except Exception as e:
+        print(f"   ❌ Error PAXG Daily: {e}")
+        return pd.DataFrame(), pd.DataFrame(), 16800, {}
 
-        for df in [paxg_d, paxg_h]:
-            cols = ['Close', 'High', 'Low', 'Open']
-            df[cols] = df[cols] * PAXG_MULTIPLIER
-        
+    # 2. DOWNLOAD PAXG HOURLY (1 Bulan) - Coba retry kalau gagal
+    try:
+        paxg_h = yf.download("PAXG-USD", period="1mo", interval="1h", progress=False)
+        if paxg_h.empty:
+            print("   ⚠️ Gagal download PAXG Hourly (Skip hourly logic).")
+            # Fallback: Pakai data daily kalau hourly gagal
+            paxg_h = paxg_d.tail(30).copy() 
+    except:
+        paxg_h = paxg_d.tail(30).copy()
+
+    # 3. DOWNLOAD KURS IDR (Terpisah)
+    try:
+        idr_df = yf.download("IDR=X", period="1d", progress=False)
+        if not idr_df.empty:
+            kurs = idr_df['Close'].iloc[-1]
+            if isinstance(kurs, pd.Series): kurs = kurs.iloc[0]
+            kurs = float(kurs)
+        else:
+            kurs = 16800.0 # Fallback manual jika Yahoo error
+    except:
+        kurs = 16800.0
+
+    print(f"   ✅ Data Loaded. Price: {fmt_usd(paxg_d['Close'].iloc[-1])} | IDR: {fmt_idr(kurs)}")
+
+    # 4. DATA PROCESSING
+    try:
+        # Fix MultiIndex Columns (Masalah umum yfinance terbaru)
+        if isinstance(paxg_d.columns, pd.MultiIndex):
+            paxg_d.columns = paxg_d.columns.get_level_values(0)
+        if isinstance(paxg_h.columns, pd.MultiIndex):
+            paxg_h.columns = paxg_h.columns.get_level_values(0)
+
+        # Kalibrasi Harga User (Multiplier)
+        cols = ['Close', 'High', 'Low', 'Open']
+        for col in cols:
+            if col in paxg_d.columns: paxg_d[col] = paxg_d[col] * PAXG_MULTIPLIER
+            if col in paxg_h.columns: paxg_h[col] = paxg_h[col] * PAXG_MULTIPLIER
+
+        # AI Optimization
         opt_data = paxg_d.tail(200).copy()
         ai_params = run_ai_optimizer(opt_data)
+
+        # Process Indicators
         paxg_d = process_data_ai(paxg_d, ai_params)
         paxg_6mo = paxg_d.tail(180).copy()
-        paxg_4h = paxg_h.resample('4h').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
-        paxg_4h = process_data_ai(paxg_4h, ai_params)
-        return paxg_6mo, paxg_4h, float(kurs), ai_params
+        
+        # Hourly Processing
+        if not paxg_h.empty:
+            paxg_4h = paxg_h.resample('4h').agg({
+                'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'
+            }).dropna()
+            paxg_4h = process_data_ai(paxg_4h, ai_params)
+        else:
+            paxg_4h = paxg_d.tail(30) # Fallback
+
+        return paxg_6mo, paxg_4h, kurs, ai_params
+
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"   ❌ Processing Error: {e}")
         return pd.DataFrame(), pd.DataFrame(), 16800, {}
 
 def send_telegram_alert(token, chat_id, message):
@@ -576,3 +615,4 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
+
