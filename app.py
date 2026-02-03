@@ -44,7 +44,7 @@ st.markdown("""
 TICKERS = ["PAXG-USD", "IDR=X"]
 MODAL_GAJI = 5000000 
 SPREAD_AJAIB = 1.015 
-PAXG_MULTIPLIER = 1.00326
+PAXG_MULTIPLIER = 0.99432278994
 
 # --- HELPER FORMATTING ---
 def fmt_idr(val): return f"Rp {val:,.0f}".replace(",", ".")
@@ -670,4 +670,5 @@ with col1:
 
 # Render Text Report in Code Block (Better CSS)
 st.code(final_report, language="yaml") # YAML syntax highlighting makes it look nice
+
 
