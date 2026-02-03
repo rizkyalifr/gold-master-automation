@@ -553,71 +553,103 @@ VOL  : {vol_status}
 
 def generate_market_update_report(df, kurs, ai_params):
     last_d = df.iloc[-1]
+    prev_d = df.iloc[-2]
+    price = last_d['Close']
+    
+    # Hitung ulang variabel penting
     fibo = calculate_fibonacci_levels(df, ai_params['FIBO_ANCHORS'])
     poc = get_poc(df)
     
-    # Hitung Score & Regime untuk narasi
-    # (Kita panggil ulang fungsi scoring atau ambil variabel dari logic sebelumnya)
-    price = last_d['Close']
-    ema_dist = ((price - last_d['EMA200']) / last_d['EMA200']) * 100
+    # Hitung Score lagi untuk "Confidence"
+    final_score, _, _, _ = calculate_quant_score(last_d, prev_d, poc, fibo['GOLDEN (0.618)'], ai_params)
     
-    # Penentuan Tren & Confidence (Logic Sederhana dari Score)
-    # Kita asumsikan confidence adalah final_score dari logic sebelumnya
-    # Untuk contoh ini, saya buat dummy mapping agar ringkas:
-    regime = "Trending Bullish 🐎" if ema_dist > 5 else "Ranging/Sideways 🦀"
-    vol_status = "Volatilitas Tinggi (Gerakan kencang)" if last_d['BB_Width'] > 0.15 else "Volatilitas Rendah (Stabil)"
+    # Tentukan Status Tren & Volatilitas untuk Narasi
+    ema_dist = ((price - last_d['EMA200']) / last_d['EMA200']) * 100
+    regime = "Trending Bullish 🐎" if ema_dist > 5 else ("Trending Bearish 🐻" if ema_dist < -5 else "Sideways/Ranging 🦀")
+    
+    is_high_vol = last_d['BB_Width'] > 0.15
+    vol_desc = "Volatilitas Tinggi (Gerakan kencang)" if is_high_vol else "Volatilitas Normal (Stabil)"
+    
+    # Tentukan Arah Narasi berdasarkan Score
+    peluang_txt = "Peluang Naik" if final_score >= 50 else "Peluang Turun/Wait"
+    icon_conf = "✅" if final_score >= 50 else "⚠️"
     
     now = datetime.now(pytz.timezone('Asia/Jakarta'))
     
-    update_msg = f""" Update Kondisi Market PAXG ({now.strftime('%d %b %Y')})
+    # Format Pesan
+    msg = f"""Update Kondisi Market PAXG ({now.strftime('%d %b %Y')})
 🕒 {now.strftime('%H:%M')} WIB
 
 Posisi: {fmt_usd(price)}
+Confidence: {final_score:.1f}% ({peluang_txt}) {icon_conf}
 Tren: {regime}
-Status: {vol_status}
+Status: {vol_desc}
 
 📊 **Peta Pergerakan Harga:**
 
 🚀 **Skenario Kalau NAIK (Resistance):**
-- Target terdekat harus lewati {fmt_usd(fibo['0.236'])} dulu.
-- ⚠️ Waspada di {fmt_usd(poc)} (POC):
-  Ini tembok volume tebal, biasanya harga "alot" atau mantul di sini.
-- 🚧 Target Lanjutan {fmt_usd(last_d['BBU'])} (Upper BB):
-  Ini batas "atap" pergerakan normal saat ini.
-- Kalau semua jebol, baru tes harga tertinggi di {fmt_usd(fibo['RESISTANCE (High)'])}.
+Target terdekat harus lewati {fmt_usd(fibo['0.236'])} dulu.
+⚠️ **Waspada di {fmt_usd(poc)} (POC):**
+Ini tembok volume tebal, biasanya harga "alot" atau mantul di sini.
+🚧 **Target Lanjutan {fmt_usd(last_d['BBU'])} (Upper BB):**
+Ini batas "atap" pergerakan normal saat ini.
+Kalau semua jebol, baru tes harga tertinggi di {fmt_usd(fibo['RESISTANCE (High)'])}.
 
 🔻 **Skenario Kalau TURUN (Support):**
-- Kalau harga koreksi, area penahan pertama ada di {fmt_usd(fibo['0.382'])}.
-- Kalau jebol ke bawah, siap-siap nahan di area tengah {fmt_usd(fibo['MID (0.5)'])} atau level paling ideal di {fmt_usd(fibo['GOLDEN (0.618)'])}.
+Kalau harga koreksi, area penahan pertama ada di {fmt_usd(fibo['0.382'])}.
+Kalau jebol ke bawah, siap-siap nahan di area tengah {fmt_usd(fibo['MID (0.5)'])} atau level paling ideal di {fmt_usd(fibo['GOLDEN (0.618)'])}.
 
-ℹ️ Note: Harga bisa selisih $20-$50 tergantung spread/platform.
-"""
-    return update_msg
+ℹ️ Note: Harga bisa selisih $20-$50 tergantung spread/platform."""
+
+    return msg
 
 
+# --- MAIN EXECUTION ---
 def run_bot():
-    # ... (kode fetch data & AI training tetap sama) ...
-
-    # 4. Generate Reports
-    sop_report = generate_sop_report(processed_d.tail(180), kurs, ai_params)
-    market_update = generate_market_update_report(processed_d.tail(180), kurs, ai_params)
+    print("="*50)
+    print("🦅 Gold Master V6 (AI Headless) Started")
+    print("="*50)
     
+    # 1. Fetch Data
+    raw_d, raw_h, kurs = get_data_engine()
+    
+    if raw_d.empty:
+        print("❌ Critical Error: Data Empty. Aborting.")
+        return
+
+    # 2. Train AI
+    ai_params = run_ai_optimizer(raw_d.tail(250))
+    
+    # 3. Process Data
+    # PENTING: Variabel processed_d harus dibuat di sini agar bisa dipakai fungsi report
+    processed_d = process_data_ai(raw_d, ai_params)
+    
+    # 4. Generate Reports
+    # Report 1: Teknis/SOP
+    sop_report = generate_sop_report(processed_d.tail(180), kurs, ai_params)
+    
+    # Report 2: Narasi Market Update (Pesan Kedua)
+    market_update_msg = generate_market_update_report(processed_d.tail(180), kurs, ai_params)
+    
+    # Print ke console untuk debugging log
     print("\n" + sop_report)
-    print("\n" + market_update)
+    print("\n" + market_update_msg)
     
     # 5. Send Telegram
     TOKEN = os.environ.get("TELEGRAM_TOKEN") 
     CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
     
     if TOKEN and CHAT_ID:
-        # Kirim Pesan 1 (SOP Eksekusi)
+        # Kirim Pesan 1
         send_telegram_alert(TOKEN, CHAT_ID, sop_report)
-        # Jeda 2 detik biar tidak kena spam limit telegram
-        time.sleep(2) 
-        # Kirim Pesan 2 (Update Market)
-        send_telegram_alert(TOKEN, CHAT_ID, market_update)
+        
+        # Jeda 3 detik agar urutan pesan terjamin rapi di Telegram
+        time.sleep(3)
+        
+        # Kirim Pesan 2
+        send_telegram_alert(TOKEN, CHAT_ID, market_update_msg)
     else:
-        print("⚠️ Skip Telegram: Token/ChatID not set.")
+        print("⚠️ Skip Telegram: Token/ChatID not set in Environment Variables.")
 
 if __name__ == "__main__":
     run_bot()
