@@ -1,15 +1,21 @@
 import os
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import requests
 from datetime import datetime
 import pytz
+from scipy.optimize import minimize
+from scipy.signal import argrelextrema
+import warnings
+
+warnings.filterwarnings("ignore")
 
 # --- KONFIGURASI ENGINE ---
-TICKER_PAXG = "PAXG-USD" 
+TICKER_PAXG = "PAXG-USD"
 TICKER_IDR = "IDR=X"
-MODAL_GAJI = 5000000 
-SPREAD_AJAIB = 1.015 
+MODAL_GAJI = 5000000
+SPREAD_AJAIB = 1.015
 PAXG_MULTIPLIER = 0.99048968
 
 # --- HELPER FORMATTING ---
@@ -19,38 +25,176 @@ def fmt_idr(val):
 
 def fmt_usd(val): return f"${val:,.2f}"
 
-# --- FUNGSI INDIKATOR (V6) ---
-def process_data_smart(df):
-    df = df.copy()
-    # 1. EMA 200
-    df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+# ==========================================
+# 1. AI OPTIMIZATION ENGINE (THE BRAIN)
+# ==========================================
+
+# --- LOSS FUNCTIONS ---
+def loss_ema(params, df, pivot_prices, pivot_indices):
+    period = int(params[0])
+    if period < 50 or period > 300: return 1e9
+    ema = df['Close'].ewm(span=period, adjust=False).mean()
+    ema_vals = ema.iloc[pivot_indices].values
+    diffs = pivot_prices - ema_vals
+    penalty = diffs < -(pivot_prices * 0.01)
+    error = np.abs(diffs)
+    error[penalty] *= 10 
+    return np.mean(error)
+
+def loss_bb(params, df, high_idx, low_idx):
+    window, std_dev = int(params[0]), params[1]
+    if window < 10 or window > 50 or std_dev < 1.5 or std_dev > 3.0: return 1e9
+    sma = df['Close'].rolling(window).mean()
+    std = df['Close'].rolling(window).std()
+    upper = sma + (std * std_dev)
+    lower = sma - (std * std_dev)
+    upper = upper.fillna(method='bfill')
+    lower = lower.fillna(method='bfill')
+    err_h = np.abs(df['High'].iloc[high_idx] - upper.iloc[high_idx]).mean()
+    err_l = np.abs(df['Low'].iloc[low_idx] - lower.iloc[low_idx]).mean()
+    return err_h + err_l
+
+def loss_macd(params, df):
+    fast, slow, signal = int(params[0]), int(params[1]), int(params[2])
+    if fast < 5 or slow < 15 or signal < 5: return 1e9
+    if fast >= slow: return 1e9
     
-    # 2. Bollinger Bands & Width
-    df['SMA20'] = df['Close'].rolling(window=20).mean()
-    df['STD20'] = df['Close'].rolling(window=20).std()
-    df['BBU'] = df['SMA20'] + (df['STD20'] * 2)
-    df['BBL'] = df['SMA20'] - (df['STD20'] * 2)
+    k = df['Close'].ewm(span=fast, adjust=False).mean()
+    d = df['Close'].ewm(span=slow, adjust=False).mean()
+    macd = k - d
+    sig = macd.ewm(span=signal, adjust=False).mean()
+    
+    cross_up = (macd > sig) & (macd.shift(1) <= sig.shift(1))
+    cross_down = (macd < sig) & (macd.shift(1) >= sig.shift(1))
+    
+    entries = df.loc[cross_up, 'Close']
+    exits = df.loc[cross_down, 'Close']
+    
+    if len(entries) == 0 or len(exits) == 0: return 1e9
+    
+    n = min(len(entries), len(exits))
+    profits = (exits.values[:n] - entries.values[:n]) / entries.values[:n]
+    return -np.sum(profits)
+
+def loss_fibo(params, future_lows, orig_low, orig_high):
+    guess_low, guess_high = params
+    if abs(guess_low - orig_low) > (orig_low * 0.03): return 1e9
+    if abs(guess_high - orig_high) > (orig_high * 0.03): return 1e9
+    if guess_low >= guess_high: return 1e9
+
+    diff = guess_high - guess_low
+    targets = [guess_high - (diff * 0.618), guess_high - (diff * 0.5)]
+    errors = []
+    for val in future_lows:
+        dists = [abs(val - t) for t in targets]
+        errors.append(min(dists))
+    return np.mean(errors) if errors else 1e9
+
+def loss_stoch_rsi(params, df):
+    length, k_smooth, d_smooth = int(params[0]), int(params[1]), int(params[2])
+    if length < 10 or length > 30 or k_smooth < 2 or d_smooth < 2: return 1e9
+    
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=length).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=length).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    
+    min_rsi = rsi.rolling(window=length).min()
+    max_rsi = rsi.rolling(window=length).max()
+    stoch = (rsi - min_rsi) / (max_rsi - min_rsi)
+    k_line = stoch.rolling(window=k_smooth).mean() * 100
+    d_line = k_line.rolling(window=d_smooth).mean()
+    
+    buy_sig = (k_line > d_line) & (k_line.shift(1) <= d_line.shift(1)) & (k_line < 25)
+    sell_sig = (k_line < d_line) & (k_line.shift(1) >= d_line.shift(1)) & (k_line > 75)
+    
+    entries = df.loc[buy_sig, 'Close']
+    exits = df.loc[sell_sig, 'Close']
+    
+    if len(entries) == 0 or len(exits) == 0: return 1e9
+    
+    n = min(len(entries), len(exits))
+    profits = (exits.values[:n] - entries.values[:n]) / entries.values[:n]
+    return -np.sum(profits)
+
+# --- AI RUNNER ---
+def run_ai_optimizer(df):
+    print("🧠 AI Brain: Optimizing Indicators...")
+    high_idx = argrelextrema(df['High'].values, np.greater, order=5)[0]
+    low_idx = argrelextrema(df['Low'].values, np.less, order=5)[0]
+    
+    # 1. OPTIMIZE EMA
+    res_ema = minimize(loss_ema, x0=[200], args=(df, df['Low'].iloc[low_idx], low_idx), method='Nelder-Mead', tol=1.0)
+    opt_ema = int(res_ema.x[0])
+    
+    # 2. OPTIMIZE BB
+    res_bb = minimize(loss_bb, x0=[20, 2.0], args=(df, high_idx, low_idx), method='Nelder-Mead', tol=0.1)
+    opt_bb_win, opt_bb_std = int(res_bb.x[0]), res_bb.x[1]
+    
+    # 3. OPTIMIZE MACD
+    res_macd = minimize(loss_macd, x0=[12, 26, 9], args=(df,), method='Nelder-Mead', tol=0.1)
+    opt_macd = (int(res_macd.x[0]), int(res_macd.x[1]), int(res_macd.x[2]))
+    
+    # 4. OPTIMIZE STOCH RSI
+    res_stoch = minimize(loss_stoch_rsi, x0=[14, 3, 3], args=(df,), method='Nelder-Mead', tol=0.1)
+    opt_stoch = (int(res_stoch.x[0]), int(res_stoch.x[1]), int(res_stoch.x[2]))
+    
+    # 5. OPTIMIZE FIBO
+    mid = len(df) // 2
+    orig_l, orig_h = df['Low'].min(), df['High'].max()
+    future_lows = df['Low'].iloc[mid:].values
+    res_fibo = minimize(loss_fibo, x0=[orig_l, orig_h], args=(future_lows, orig_l, orig_h), method='Nelder-Mead', tol=0.1)
+    opt_fibo = (res_fibo.x[0], res_fibo.x[1])
+    
+    return {
+        "EMA": opt_ema,
+        "BB": (opt_bb_win, opt_bb_std),
+        "MACD": opt_macd,
+        "STOCH": opt_stoch,
+        "FIBO_ANCHORS": opt_fibo
+    }
+
+# ==========================================
+# 2. DATA PROCESSING (DYNAMIC)
+# ==========================================
+
+def process_data_ai(df, params):
+    df = df.copy()
+    
+    # 1. AI EMA
+    df['EMA200'] = df['Close'].ewm(span=params['EMA'], adjust=False).mean()
+    
+    # 2. AI Bollinger
+    win, std = params['BB']
+    df['SMA20'] = df['Close'].rolling(window=win).mean()
+    df['STD20'] = df['Close'].rolling(window=win).std()
+    df['BBU'] = df['SMA20'] + (df['STD20'] * std)
+    df['BBL'] = df['SMA20'] - (df['STD20'] * std)
     df['BBM'] = df['SMA20']
     df['BB_Width'] = (df['BBU'] - df['BBL']) / df['BBM']
     
-    # 3. MACD
-    k = df['Close'].ewm(span=12, adjust=False).mean()
-    d = df['Close'].ewm(span=26, adjust=False).mean()
+    # 3. AI MACD
+    fast, slow, sig = params['MACD']
+    k = df['Close'].ewm(span=fast, adjust=False).mean()
+    d = df['Close'].ewm(span=slow, adjust=False).mean()
     df['MACD'] = k - d
-    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['MACD_Signal'] = df['MACD'].ewm(span=sig, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
     
-    # 4. Stoch RSI
+    # 4. AI Stoch RSI
+    length, k_smooth, d_smooth = params['STOCH']
     delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    gain = (delta.where(delta > 0, 0)).rolling(window=length).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=length).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
-    min_rsi = df['RSI'].rolling(window=14).min()
-    max_rsi = df['RSI'].rolling(window=14).max()
+    
+    min_rsi = df['RSI'].rolling(window=length).min()
+    max_rsi = df['RSI'].rolling(window=length).max()
     stoch = (df['RSI'] - min_rsi) / (max_rsi - min_rsi)
-    df['STOCHRSIk'] = stoch.rolling(window=3).mean() * 100
-    df['STOCHRSId'] = df['STOCHRSIk'].rolling(window=3).mean()
+    df['STOCHRSIk'] = stoch.rolling(window=k_smooth).mean() * 100
+    df['STOCHRSId'] = df['STOCHRSIk'].rolling(window=d_smooth).mean()
     
     return df
 
@@ -60,11 +204,9 @@ def get_poc(df):
     vpvr = df.groupby(price_bins, observed=True)['Volume'].sum()
     return vpvr.idxmax().mid
 
-# --- FIBONACCI LEVELS ---
-def calculate_fibonacci_levels(df):
-    if df.empty: return {}
-    high = df['High'].max()
-    low = df['Low'].min()
+# --- AI FIBONACCI LEVELS ---
+def calculate_fibonacci_levels(df, anchors):
+    low, high = anchors
     diff = high - low
     return {
         "MOONBAG (1.618)": high + (diff * 0.618),
@@ -77,14 +219,17 @@ def calculate_fibonacci_levels(df):
         "FLOOR (Low)": low
     }
 
-# --- SCORING ENGINE (V6: DETAIL + FLAGS) ---
-def calculate_quant_score(row, prev_row, poc, fibo_golden):
+# ==========================================
+# 3. SCORING ENGINE
+# ==========================================
+
+def calculate_quant_score(row, prev_row, poc, fibo_golden, opt_params):
     price = row['Close']
     scores = {}
     details = {}
     bullish_flags = 0
 
-    # 1. EMA 200
+    # 1. EMA (AI)
     ema = row['EMA200']
     dist_pct = ((price - ema) / ema) * 100
     if dist_pct >= 12: score_ema = 100
@@ -94,7 +239,7 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden):
     else: score_ema = 30 
     scores['EMA'] = score_ema
     trend_txt = "BULLISH" if price > ema else "BEARISH"
-    details['EMA'] = f"{trend_txt} | Price ${price:.0f} vs EMA ${ema:.0f} ({dist_pct:+.1f}%)"
+    details['EMA'] = f"AI-EMA({opt_params['EMA']}) | Price ${price:.0f} vs EMA ${ema:.0f} ({dist_pct:+.1f}%)"
     if score_ema >= 55: bullish_flags += 1
 
     # 2. VPVR POC
@@ -106,7 +251,7 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden):
     details['VPVR'] = f"{pos_txt} | POC: ${poc:.0f}"
     if score_vpvr >= 60: bullish_flags += 1
 
-    # 3. MACD
+    # 3. MACD (AI)
     hist = row['MACD_Hist']
     prev_hist = prev_row['MACD_Hist']
     if hist > 0 and hist > prev_hist: score_macd = 100
@@ -114,10 +259,11 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden):
     elif hist < 0 and hist > prev_hist: score_macd = 50
     else: score_macd = 30
     scores['MACD'] = score_macd
-    details['MACD'] = f"Hist: {hist:+.2f} | Line: {row['MACD']:.1f} | Sig: {row['MACD_Signal']:.1f}"
+    p = opt_params['MACD']
+    details['MACD'] = f"AI-MACD({p[0]},{p[1]},{p[2]}) | Hist: {hist:+.2f}"
     if score_macd >= 70: bullish_flags += 1
 
-    # 4. Stoch RSI
+    # 4. Stoch RSI (AI)
     k = row['STOCHRSIk']
     d = row['STOCHRSId']
     if k < 20 and k > d: score_stoch = 90
@@ -125,26 +271,28 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden):
     elif k > 80: score_stoch = 35
     else: score_stoch = 50
     scores['STOCH'] = score_stoch
-    details['STOCH'] = f"K: {k:.1f} | D: {d:.1f}"
+    p = opt_params['STOCH']
+    details['STOCH'] = f"AI-Stoch({p[0]},{p[1]},{p[2]}) | K: {k:.1f} | D: {d:.1f}"
     if score_stoch >= 65: bullish_flags += 1
 
-    # 5. Bollinger
+    # 5. Bollinger (AI)
     if price <= row['BBL']: score_bb = 85
     elif price < row['BBM']: score_bb = 65
     elif price < row['BBU']: score_bb = 35
     else: score_bb = 20
     scores['BB'] = score_bb
-    details['BB'] = f"Upper: ${row['BBU']:.0f} | Lower: ${row['BBL']:.0f}"
+    p = opt_params['BB']
+    details['BB'] = f"AI-BB({p[0]},{p[1]:.1f}) | Up: ${row['BBU']:.0f} | Low: ${row['BBL']:.0f}"
     if score_bb >= 65: bullish_flags += 1
 
-    # 6. Fibonacci
+    # 6. Fibonacci (AI)
     dist_fibo_pct = abs((price - fibo_golden) / fibo_golden) * 100
     if dist_fibo_pct <= 1.5: score_fibo = 90
     elif price > fibo_golden: score_fibo = 55
     elif price < fibo_golden * 0.95: score_fibo = 40
     else: score_fibo = 75
     scores['FIBO'] = score_fibo
-    details['FIBO'] = f"Dist Golden: {dist_fibo_pct:.1f}%"
+    details['FIBO'] = f"AI-Fibo | Dist to Golden: {dist_fibo_pct:.1f}% | Target: ${fibo_golden:.0f}"
     if score_fibo >= 55: bullish_flags += 1
 
     final_score = (
@@ -157,7 +305,6 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden):
 # --- DATA ENGINE ---
 def get_data_engine():
     try:
-        # Fetch Kurs (Single)
         idr_df = yf.download(TICKER_IDR, period="1d", progress=False)
         if not idr_df.empty:
             kurs = idr_df['Close'].iloc[-1]
@@ -169,14 +316,12 @@ def get_data_engine():
     print(f"⏳ Mengambil Data Market... Kurs: {fmt_idr(kurs)}")
 
     try:
-        # 1. Fetch 2 TAHUN (Untuk EMA 200)
         df_full = yf.download(TICKER_PAXG, period="2y", interval="1d", progress=False)
-        # Fetch 1 Bulan Hourly
         df_hourly = yf.download(TICKER_PAXG, period="1mo", interval="1h", progress=False)
         
         if df_full.empty or df_hourly.empty:
             print("❌ Gagal Download Data PAXG")
-            return pd.DataFrame(), pd.DataFrame(), kurs
+            return pd.DataFrame(), pd.DataFrame(), kurs, {}
 
         paxg_d = df_full
         if isinstance(paxg_d.columns, pd.MultiIndex): paxg_d.columns = paxg_d.columns.get_level_values(0)
@@ -184,51 +329,52 @@ def get_data_engine():
         paxg_h = df_hourly
         if isinstance(paxg_h.columns, pd.MultiIndex): paxg_h.columns = paxg_h.columns.get_level_values(0)
 
-        # Kalibrasi
         for df in [paxg_d, paxg_h]:
             df['Close'] *= PAXG_MULTIPLIER
             df['High'] *= PAXG_MULTIPLIER
             df['Low'] *= PAXG_MULTIPLIER
             df['Open'] *= PAXG_MULTIPLIER
 
-        # 2. HITUNG INDIKATOR
-        paxg_d = process_data_smart(paxg_d)
+        # --- JALANKAN AI ---
+        opt_data = paxg_d.tail(200).copy()
+        ai_params = run_ai_optimizer(opt_data)
+
+        # Apply Params
+        paxg_d = process_data_ai(paxg_d, ai_params)
         paxg_6mo = paxg_d.tail(180).copy()
         
-        # 3. HOURLY
         paxg_4h = paxg_h.resample('4h').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
-        paxg_4h = process_data_smart(paxg_4h)
+        paxg_4h = process_data_ai(paxg_4h, ai_params)
         
-        return paxg_6mo, paxg_4h, kurs
+        return paxg_6mo, paxg_4h, kurs, ai_params
 
     except Exception as e:
-        print(f"❌ Error Data: {e}")
-        return pd.DataFrame(), pd.DataFrame(), kurs
+        print(f"❌ Error Data Processing: {e}")
+        return pd.DataFrame(), pd.DataFrame(), kurs, {}
 
-# --- SEND TELEGRAM ---
 def send_telegram(token, chat_id, message):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     params = {"chat_id": chat_id, "text": message}
     try:
         r = requests.get(url, params=params)
-        if r.status_code == 200: print("✅ Sent to Telegram!")
-        else: print(f"❌ Failed: {r.text}")
+        if r.status_code == 200: print("✅ Laporan Terkirim ke Telegram!")
+        else: print(f"❌ Gagal Kirim: {r.text}")
     except Exception as e:
-        print(f"❌ Connection Error: {e}")
+        print(f"❌ Error Koneksi Telegram: {e}")
 
-# --- REPORT GENERATOR (V6 LOGIC + DETAIL) ---
-def generate_sop_report(df_6mo, df_4h, kurs):
+# --- REPORT GENERATOR ---
+def generate_sop_report(df_6mo, df_4h, kurs, ai_params):
     last_d = df_6mo.iloc[-1]
     prev_d = df_6mo.iloc[-2]
     price = last_d['Close']
     
-    fibo = calculate_fibonacci_levels(df_6mo) 
+    fibo = calculate_fibonacci_levels(df_6mo, ai_params['FIBO_ANCHORS']) 
     poc = get_poc(df_6mo)
     
     # 1. QUANT SCORE
-    final_score, scores, details, bullish_count = calculate_quant_score(last_d, prev_d, poc, fibo['GOLDEN (0.618)'])
+    final_score, scores, details, bullish_count = calculate_quant_score(last_d, prev_d, poc, fibo['GOLDEN (0.618)'], ai_params)
     
-    # 2. MARKET REGIME & VOLATILITY
+    # 2. MARKET REGIME
     ema_dist = ((price - last_d['EMA200']) / last_d['EMA200']) * 100
     if ema_dist > 5: regime = "🐎 TRENDING BULLISH"
     elif ema_dist < -5: regime = "🐻 TRENDING BEARISH"
@@ -238,7 +384,7 @@ def generate_sop_report(df_6mo, df_4h, kurs):
     is_high_vol = bb_width > 0.15
     vol_status = "⚡ HIGH VOLATILITY" if is_high_vol else "🌊 NORMAL/LOW VOL"
     
-    # 3. SELL LOGIC (PARTIAL LADDER V6)
+    # 3. SELL LOGIC
     action_type = "BUY"
     sell_reason = ""
     sell_pct = 0
@@ -261,7 +407,7 @@ def generate_sop_report(df_6mo, df_4h, kurs):
         sell_reason = "Overbought at Resistance"
         sell_pct = 20
 
-    # 4. BUY LOGIC & SIZING (V6)
+    # 4. BUY LOGIC & SIZING
     dana_market = 0
     dana_limit = 0
     decision_title = ""
@@ -294,10 +440,10 @@ def generate_sop_report(df_6mo, df_4h, kurs):
         dana_market = MODAL_GAJI * alloc_market
         dana_limit = MODAL_GAJI * alloc_limit
 
-    # 5. SMART LIMIT (V6)
+    # 5. SMART LIMIT
     candidates = [
         {'price': poc, 'label': 'POC'},
-        {'price': last_d['EMA200'], 'label': 'EMA 200'},
+        {'price': last_d['EMA200'], 'label': f"EMA {ai_params['EMA']}"},
         {'price': fibo['0.382'], 'label': 'Fibo 0.382'},
         {'price': fibo['MID (0.5)'], 'label': 'Fibo 0.5'},
         {'price': fibo['GOLDEN (0.618)'], 'label': 'Golden'}
@@ -336,22 +482,22 @@ def generate_sop_report(df_6mo, df_4h, kurs):
    👉 Est. IDR: {fmt_idr(est_limit_idr)}
         """
 
-    report = f"""🦅 GOLD MASTER V6 (HEADLESS QUANT)
+    report = f"""🦅 GOLD MASTER V6 (AI ENHANCED)
 📅 {now.strftime('%d %b %Y | %H:%M WIB')}
 =======================================
 
 💰 **MARKET DATA**
 PAXG : {fmt_usd(price)}
-EMA  : {fmt_usd(last_d['EMA200'])}
+EMA  : {fmt_usd(last_d['EMA200'])} (Per: {ai_params['EMA']})
 VOL  : {vol_status}
 
-📊 **MATRIX 6 INDIKATOR**
-1. EMA 200    [{scores['EMA']}] {details['EMA']}
-2. VPVR POC   [{scores['VPVR']}] {details['VPVR']}
-3. MACD       [{scores['MACD']}] {details['MACD']}
-4. Stoch RSI  [{scores['STOCH']}] {details['STOCH']}
-5. Bollinger  [{scores['BB']}] {details['BB']}
-6. Fibonacci  [{scores['FIBO']}] {details['FIBO']}
+📊 **MATRIX 6 INDIKATOR (AI OPTIMIZED)**
+1. EMA       [{scores['EMA']}] {details['EMA']}
+2. VPVR POC  [{scores['VPVR']}] {details['VPVR']}
+3. MACD      [{scores['MACD']}] {details['MACD']}
+4. Stoch RSI [{scores['STOCH']}] {details['STOCH']}
+5. Bollinger [{scores['BB']}] {details['BB']}
+6. Fibonacci [{scores['FIBO']}] {details['FIBO']}
 
 🧮 SCORE: {final_score:.1f}/100 | {agreement}
 🌍 REGIME: {regime}
@@ -373,17 +519,17 @@ VOL  : {vol_status}
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    print("🤖 Robot Start (Headless Quant)...")
+    print("🤖 Robot Start (AI Headless)...")
     
     TOKEN = os.environ.get("TELEGRAM_TOKEN")
     CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
     
-    df_6mo, df_4h, kurs = get_data_engine()
+    df_6mo, df_4h, kurs, ai_params = get_data_engine()
     
     if df_6mo.empty:
         print("❌ Data PAXG Kosong.")
     else:
-        final_report = generate_sop_report(df_6mo, df_4h, kurs)
+        final_report = generate_sop_report(df_6mo, df_4h, kurs, ai_params)
         
         print("\n" + "="*50)
         print(final_report)
