@@ -6,5 +6,5 @@ plotly
 requests
 pytz
 scipy
-pandas_ta
 mplfinance
+
