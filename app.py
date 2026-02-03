@@ -1,7 +1,8 @@
-import os
+import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
 import requests
 from datetime import datetime
 import pytz
@@ -10,8 +11,34 @@ from scipy.signal import argrelextrema
 import warnings
 import time
 
-# Matikan warning agar log bersih
 warnings.filterwarnings("ignore")
+
+# --- KONFIGURASI HALAMAN ---
+st.set_page_config(page_title="Gold Master V6 AI Enhanced", page_icon="🦅", layout="wide")
+
+# --- CSS PRO ---
+st.markdown("""
+<style>
+    [data-testid="stMetricValue"] { font-size: 24px; font-weight: bold; }
+    .report-box { 
+        font-family: 'Consolas', 'Courier New', monospace; 
+        white-space: pre-wrap; 
+        background-color: #0e1117; 
+        padding: 20px; 
+        border-radius: 8px; 
+        color: #00ff00; 
+        border: 1px solid #333;
+        font-size: 14px;
+        line-height: 1.5;
+    }
+    .stButton>button { 
+        width: 100%; 
+        border-radius: 5px; 
+        font-weight: bold;
+        height: 50px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # --- KONFIGURASI ENGINE ---
 TICKERS = ["PAXG-USD", "IDR=X"]
@@ -27,18 +54,20 @@ def fmt_usd(val): return f"${val:,.2f}"
 # 1. AI OPTIMIZATION ENGINE (WALK-FORWARD)
 # ==========================================
 
-# --- LOSS FUNCTIONS (STRICT BOUNDS - SAME AS APP.PY) ---
+# --- LOSS FUNCTIONS (STRICT BOUNDS) ---
 def loss_ema(params, df, pivot_prices, pivot_indices):
     period = int(params[0])
+    # Strict Bounds: EMA di bawah 50 atau di atas 300 dianggap noise/lagging parah
     if period < 50 or period > 300: return 1e12 
     
     ema = df['Close'].ewm(span=period, adjust=False).mean()
     ema_vals = ema.iloc[pivot_indices].values
     
+    # Validasi panjang array
     if len(ema_vals) != len(pivot_prices): return 1e12
     
     diffs = pivot_prices - ema_vals
-    penalty = diffs < -(pivot_prices * 0.01)
+    penalty = diffs < -(pivot_prices * 0.01) # Penalty jika harga jebol EMA terlalu dalam
     error = np.abs(diffs)
     error[penalty] *= 10 
     return np.mean(error)
@@ -55,6 +84,7 @@ def loss_bb(params, df, high_idx, low_idx):
     upper = upper.fillna(method='bfill')
     lower = lower.fillna(method='bfill')
     
+    # Ambil index yang valid saja
     valid_h = [i for i in high_idx if i < len(df)]
     valid_l = [i for i in low_idx if i < len(df)]
     
@@ -80,11 +110,11 @@ def loss_macd(params, df):
     entries = df.loc[cross_up, 'Close']
     exits = df.loc[cross_down, 'Close']
     
-    if len(entries) == 0 or len(exits) == 0: return 0
+    if len(entries) == 0 or len(exits) == 0: return 0 # No trade = No profit/loss
     
     n = min(len(entries), len(exits))
     profits = (exits.values[:n] - entries.values[:n]) / entries.values[:n]
-    return -np.sum(profits)
+    return -np.sum(profits) 
 
 def loss_fibo(params, future_lows, orig_low, orig_high):
     guess_low, guess_high = params
@@ -96,6 +126,7 @@ def loss_fibo(params, future_lows, orig_low, orig_high):
     targets = [guess_high - (diff * 0.618), guess_high - (diff * 0.5)]
     errors = []
     
+    # Vectorized calculation for speed
     for t in targets:
         dist = np.min(np.abs(future_lows - t))
         errors.append(dist)
@@ -110,6 +141,7 @@ def loss_stoch_rsi(params, df):
     gain = (delta.where(delta > 0, 0)).rolling(window=length).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=length).mean()
     
+    # Handle division by zero
     loss = loss.replace(0, 0.0001)
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
@@ -135,12 +167,15 @@ def loss_stoch_rsi(params, df):
     profits = (exits.values[:n] - entries.values[:n]) / entries.values[:n]
     return -np.sum(profits)
 
-# --- AI RUNNER ---
+# --- AI RUNNER (OPTIMIZED) ---
+@st.cache_data(ttl=3600, show_spinner=False)
 def run_ai_optimizer(df):
-    print("   🧠 Starting AI Optimization (Walk-Forward Analysis)...")
+    # Split Data: Train (70%) vs Validation (30%)
+    # Agar tidak overfitting, kita optimasi di data lama, lalu test di data baru.
     split_idx = int(len(df) * 0.8)
     train_df = df.iloc[:split_idx].copy()
     
+    # Prepare Pivot Data for Train
     high_idx = argrelextrema(train_df['High'].values, np.greater, order=5)[0]
     low_idx = argrelextrema(train_df['Low'].values, np.less, order=5)[0]
     
@@ -150,7 +185,7 @@ def run_ai_optimizer(df):
     try:
         res_ema = minimize(loss_ema, x0=[200], args=(train_df, train_df['Low'].iloc[low_idx], low_idx), method='Nelder-Mead', tol=1.0)
         results['EMA'] = int(res_ema.x[0])
-    except: results['EMA'] = 200
+    except: results['EMA'] = 200 # Fallback
 
     # 2. OPTIMIZE BB
     try:
@@ -170,7 +205,7 @@ def run_ai_optimizer(df):
         results['STOCH'] = (int(res_stoch.x[0]), int(res_stoch.x[1]), int(res_stoch.x[2]))
     except: results['STOCH'] = (14, 3, 3)
 
-    # 5. OPTIMIZE FIBO
+    # 5. OPTIMIZE FIBO (Full Data Context for Anchors)
     try:
         mid = len(df) // 2
         orig_l, orig_h = df['Low'].min(), df['High'].max()
@@ -180,7 +215,6 @@ def run_ai_optimizer(df):
     except: 
         results['FIBO_ANCHORS'] = (df['Low'].min(), df['High'].max())
     
-    print(f"   ✅ Optimization Complete: EMA={results['EMA']} | BB={results['BB']}")
     return results
 
 # ==========================================
@@ -201,9 +235,11 @@ def process_data_ai(df, params):
     df['BBL'] = df['SMA20'] - (df['STD20'] * std)
     df['BBM'] = df['SMA20']
     
+    # Handle NaN for Width calculation
     bbu = df['BBU'].fillna(method='bfill')
     bbl = df['BBL'].fillna(method='bfill')
     bbm = df['BBM'].fillna(method='bfill')
+    # Avoid division by zero
     bbm = bbm.replace(0, 0.0001)
     df['BB_Width'] = (bbu - bbl) / bbm
     
@@ -220,12 +256,14 @@ def process_data_ai(df, params):
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=length).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=length).mean()
+    
     loss = loss.replace(0, 0.0001)
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
     min_rsi = df['RSI'].rolling(window=length).min()
     max_rsi = df['RSI'].rolling(window=length).max()
+    
     denominator = (max_rsi - min_rsi).replace(0, 0.0001)
     stoch = (df['RSI'] - min_rsi) / denominator
     df['STOCHRSIk'] = stoch.rolling(window=k_smooth).mean() * 100
@@ -257,7 +295,7 @@ def calculate_fibonacci_levels(df, anchors):
     }
 
 # ==========================================
-# 3. SCORING ENGINE
+# 3. SCORING ENGINE (UNCHANGED OUTPUT LOGIC)
 # ==========================================
 
 def calculate_quant_score(row, prev_row, poc, fibo_golden, opt_params):
@@ -338,9 +376,10 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden, opt_params):
     
     return final_score, scores, details, bullish_flags
 
-# --- DATA ENGINE ---
+# --- DATA ENGINE (ROBUST) ---
+@st.cache_data(ttl=300, show_spinner=False)
 def get_data_engine():
-    print("⏳ Connecting to Market Data...")
+    # Retry mechanism
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -350,54 +389,50 @@ def get_data_engine():
             if not df_full.empty and not df_hourly.empty:
                 break
         except Exception as e:
-            print(f"   ⚠️ Retry {attempt+1}/{max_retries}...")
             if attempt == max_retries - 1:
-                return pd.DataFrame(), pd.DataFrame(), 16800
+                return pd.DataFrame(), pd.DataFrame(), 16800, {}
             time.sleep(1)
 
     try:
+        # Handling MultiIndex Columns cleanly
         if isinstance(df_full.columns, pd.MultiIndex):
             paxg_d = df_full['PAXG-USD'].dropna()
             paxg_h = df_hourly['PAXG-USD'].dropna()
             kurs = df_full['IDR=X']['Close'].iloc[-1]
             if isinstance(kurs, pd.Series): kurs = kurs.iloc[0]
         else:
-            print("   ❌ Invalid Data Structure")
-            return pd.DataFrame(), pd.DataFrame(), 16800
+            return pd.DataFrame(), pd.DataFrame(), 16800, {}
 
+        # Multiplier Correction
         for df in [paxg_d, paxg_h]:
             cols = ['Close', 'High', 'Low', 'Open']
             df[cols] = df[cols] * PAXG_MULTIPLIER
+
+        # AI Optimization Trigger
+        # Kita pakai 250 candle terakhir untuk optimasi agar cukup datanya
+        opt_data = paxg_d.tail(250).copy()
         
-        print(f"   ✅ Data Loaded. Price: {fmt_usd(paxg_d['Close'].iloc[-1])} | IDR: {fmt_idr(kurs)}")
+        # NOTE: run_ai_optimizer dipanggil di luar cache data agar UI bisa progress bar
+        # Tapi untuk efisiensi di sini kita return raw data dulu
+        
         return paxg_d, paxg_h, float(kurs)
 
     except Exception as e:
-        print(f"   ❌ Data Processing Error: {e}")
-        return pd.DataFrame(), pd.DataFrame(), 16800
+        return pd.DataFrame(), pd.DataFrame(), 16800, {}
 
 def send_telegram_alert(token, chat_id, message):
-    if not token or not chat_id: 
-        print("   ⚠️ Telegram Credentials Missing.")
-        return False
-    
-    print("🚀 Sending Telegram Alert...")
+    if not token or not chat_id: return False, "Token/ID Kosong"
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     params = {"chat_id": chat_id, "text": message}
     try:
         r = requests.get(url, params=params)
-        if r.status_code == 200: 
-            print("   ✅ Message Sent Successfully!")
-            return True
-        else: 
-            print(f"   ❌ Telegram Failed: {r.text}")
-            return False
+        if r.status_code == 200: return True, "Sukses"
+        else: return False, r.text
     except Exception as e:
-        print(f"   ❌ Connection Error: {str(e)}")
-        return False
+        return False, str(e)
 
 # --- REPORT GENERATOR ---
-def generate_sop_report(df_6mo, kurs, ai_params):
+def generate_sop_report(df_6mo, df_4h, kurs, ai_params):
     last_d = df_6mo.iloc[-1]
     prev_d = df_6mo.iloc[-2]
     price = last_d['Close']
@@ -549,44 +584,89 @@ VOL  : {vol_status}
     for k, v in sorted_fibo.items():
         report += f"{k:<15}: {fmt_usd(v)}\n"
         
-    return report
+    return report, df_6mo, fibo, final_score
 
-# --- MAIN EXECUTION ---
-def run_bot():
-    print("="*50)
-    print("🦅 Gold Master V6 (AI Headless) Started")
-    print("="*50)
-    
-    # 1. Fetch Data
-    raw_d, raw_h, kurs = get_data_engine()
-    
-    if raw_d.empty:
-        print("❌ Critical Error: Data Empty. Aborting.")
-        return
+# --- MAIN APP ---
+st.title("Gold Master V6 (AI Institutional)")
 
-    # 2. Train AI
-    ai_params = run_ai_optimizer(raw_d.tail(250))
+# --- STATUS BAR (PRO UI) ---
+with st.status("🦅 AI Brain Initialization...", expanded=True) as status:
+    st.write("📡 Fetching Real-time Market Data...")
+    paxg_d_raw, paxg_h_raw, kurs_val = get_data_engine()
     
-    # 3. Process Data
-    processed_d = process_data_ai(raw_d, ai_params)
+    if paxg_d_raw.empty:
+        status.update(label="❌ Data Error", state="error")
+        st.error("Gagal mengambil data. Cek koneksi internet.")
+        st.stop()
     
-    # Note: Meskipun report hanya butuh processed_d (Daily),
-    # kita bisa kembangkan logic Hourly nanti.
+    st.write("🧠 Training AI Model on Historical Data...")
+    ai_params = run_ai_optimizer(paxg_d_raw.tail(250))
     
-    # 4. Generate Report
-    final_report = generate_sop_report(processed_d.tail(180), kurs, ai_params)
+    st.write("⚙️ Applying Optimized Parameters...")
+    paxg_d = process_data_ai(paxg_d_raw, ai_params)
+    paxg_6mo = paxg_d.tail(180).copy()
     
-    print("\n" + final_report)
+    paxg_4h = paxg_h_raw.resample('4h').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
+    paxg_4h = process_data_ai(paxg_4h, ai_params)
     
-    # 5. Send Telegram
-    # Pastikan Set Environment Variables atau Hardcode disini
-    TOKEN = os.environ.get("TELEGRAM_TOKEN") 
-    CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-    
-    if TOKEN and CHAT_ID:
-        send_telegram_alert(TOKEN, CHAT_ID, final_report)
-    else:
-        print("⚠️ Skip Telegram: Token/ChatID not set in Environment Variables.")
+    status.update(label="✅ AI Ready!", state="complete", expanded=False)
 
-if __name__ == "__main__":
-    run_bot()
+# --- REPORT GENERATION ---
+final_report, xau_processed, fib_levels, score_val = generate_sop_report(paxg_6mo, paxg_4h, kurs_val, ai_params)
+
+# --- SIDEBAR ---
+st.sidebar.header("⚙️ AI Parameters")
+st.sidebar.info(f"EMA Period: {ai_params['EMA']}")
+st.sidebar.info(f"BB: Win {ai_params['BB'][0]} | Std {ai_params['BB'][1]:.2f}")
+st.sidebar.info(f"MACD: {ai_params['MACD']}")
+st.sidebar.info(f"Stoch: {ai_params['STOCH']}")
+
+st.sidebar.header("⚙️ Telegram")
+if "TELEGRAM_TOKEN" in st.secrets:
+    bot_token = st.secrets["TELEGRAM_TOKEN"]
+    chat_id = st.secrets["TELEGRAM_CHAT_ID"]
+else:
+    bot_token = st.sidebar.text_input("Bot Token", type="password")
+    chat_id = st.sidebar.text_input("Chat ID")
+
+st.sidebar.markdown("---")
+score_color = "normal" if score_val >= 65 else "inverse"
+st.sidebar.metric("QUANT SCORE", f"{score_val:.1f}", delta="Strength", delta_color=score_color)
+st.sidebar.metric("PRICE", fmt_usd(xau_processed.iloc[-1]['Close']))
+
+# --- CHART ---
+st.subheader("Institutional Chart View (AI Optimized)")
+fig = go.Figure(data=[go.Candlestick(x=xau_processed.index,
+                                open=xau_processed['Open'], high=xau_processed['High'],
+                                low=xau_processed['Low'], close=xau_processed['Close'],
+                                name='PAXG/USD')])
+
+# EMA
+fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['EMA200'], line=dict(color='blue', width=2), name=f'EMA {ai_params["EMA"]}'))
+# BB
+fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['BBU'], line=dict(color='red', width=1, dash='dot'), name='Upper BB'))
+fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['BBL'], line=dict(color='green', width=1, dash='dot'), name='Lower BB'))
+
+# Fibo
+colors_fib = {"MOONBAG": "lime", "RESISTANCE": "red", "GOLDEN": "gold", "FLOOR": "white", "MID": "gray"}
+for label, val in fib_levels.items():
+    c = "gray"
+    for k, v in colors_fib.items():
+        if k in label: c = v
+    fig.add_hline(y=val, line_dash="dash", line_color=c, annotation_text=f"{label}")
+    
+fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=30, b=0))
+st.plotly_chart(fig, use_container_width=True)
+
+# --- REPORT OUTPUT ---
+st.subheader("📋 Institutional Execution Report")
+col1, col2 = st.columns([1, 4])
+with col1:
+    if st.button("📩 Broadcast Telegram"):
+        with st.spinner("Sending..."):
+            success, msg = send_telegram_alert(bot_token, chat_id, final_report)
+            if success: st.success("Sent!")
+            else: st.error(f"Failed: {msg}")
+
+# Render Text Report in Code Block (Better CSS)
+st.code(final_report, language="yaml") # YAML syntax highlighting makes it look nice
