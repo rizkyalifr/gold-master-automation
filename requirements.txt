@@ -1,5 +1,10 @@
 streamlit
 yfinance
 pandas
+numpy
 plotly
 requests
+pytz
+scipy
+pandas_ta
+mplfinance
