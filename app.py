@@ -208,13 +208,13 @@ def run_ai_optimizer(df_daily, df_4h):
 
     # 5. OPTIMIZE FIBO (Full Data Context for Anchors)
     try:
-        mid = len(df) // 2
-        orig_l, orig_h = df['Low'].min(), df['High'].max()
-        future_lows = df['Low'].iloc[mid:].values 
+        mid = len(df_daily) // 2
+        orig_l, orig_h = df_daily['Low'].min(), df_daily['High'].max()
+        future_lows = df_daily['Low'].iloc[mid:].values 
         res_fibo = minimize(loss_fibo, x0=[orig_l, orig_h], args=(future_lows, orig_l, orig_h), method='Nelder-Mead', tol=0.1)
         results['FIBO_ANCHORS'] = (res_fibo.x[0], res_fibo.x[1])
     except: 
-        results['FIBO_ANCHORS'] = (df['Low'].min(), df['High'].max())
+        results['FIBO_ANCHORS'] = (df_daily['Low'].min(), df_daily['High'].max())
     
     return results
 # ==========================================
@@ -695,6 +695,7 @@ with col1:
 
 # Render Text Report in Code Block (Better CSS)
 st.code(final_report, language="yaml")
+
 
 
 
