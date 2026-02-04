@@ -206,66 +206,15 @@ def run_ai_optimizer(df_daily, df_4h):
         results['STOCH'] = (int(res_stoch.x[0]), int(res_stoch.x[1]), int(res_stoch.x[2]))
     except: results['STOCH'] = (14, 3, 3)
 
-    # 3. SMART FIBO OPTIMIZER (LOGIC BARU)
-    # ------------------------------------
-    # Konsep: Cari kandidat High & Low PENTING, lalu test mana yang level 0.5 & 0.618-nya paling relevan.
-    
-    # Ambil data structure (misal 250 hari terakhir biar relevan sama trend tahun ini)
-    df_struct = df_daily.tail(250).copy()
-    prices = df_struct['Close'].values
-    highs = df_struct['High'].values
-    lows = df_struct['Low'].values
-    
-    # Cari Puncak (Major Highs) dan Lembah (Major Lows)
-    # Order=10 artinya ini titik tertinggi/terendah dalam window 20 candle (signifikan)
-    peak_indexes = argrelextrema(highs, np.greater, order=10)[0]
-    trough_indexes = argrelextrema(lows, np.less, order=10)[0]
-    
-    # Ambil nilai harga dari index tersebut
-    candidate_highs = highs[peak_indexes]
-    candidate_lows = lows[trough_indexes]
-    
-    # Tambahkan High Tertinggi & Low Terendah absolut sebagai kandidat wajib
-    candidate_highs = np.append(candidate_highs, df_struct['High'].max())
-    candidate_lows = np.append(candidate_lows, df_struct['Low'].min())
-    
-    # Filter: Hanya ambil 5 High teratas dan 5 Low terbawah (Top Tier Candidates)
-    # Supaya loop-nya cepat dan tidak memproses noise
-    candidate_highs = np.unique(sorted(candidate_highs, reverse=True)[:5])
-    candidate_lows = np.unique(sorted(candidate_lows)[:5]) # Low diambil yang terkecil
-    
-    best_score = -1
-    best_anchors = (df_struct['Low'].min(), df_struct['High'].max()) # Default Fallback
-    
-    # BRUTE FORCE SEARCH (Cari kombinasi terbaik)
-    for h in candidate_highs:
-        for l in candidate_lows:
-            if h <= l: continue # Skip jika harga high lebih rendah dari low (ngaco)
-            if (h - l) / l < 0.05: continue # Skip jika jarak high-low terlalu dekat (<5%)
-            
-            # Hitung level Fibo Golden Area untuk pasangan ini
-            diff = h - l
-            level_618 = h - (diff * 0.618)
-            level_050 = h - (diff * 0.5)
-            level_382 = h - (diff * 0.382)
-            
-            # SCORING: Hitung berapa banyak candle yang 'Close'-nya nempel di level-level ini
-            # Kita pakai tolerance 1%
-            tolerance = diff * 0.01 
-            
-            # Vectorized counting
-            hits_618 = np.sum(np.abs(prices - level_618) < tolerance)
-            hits_050 = np.sum(np.abs(prices - level_050) < tolerance)
-            hits_382 = np.sum(np.abs(prices - level_382) < tolerance)
-            
-            # Total Score (Weighted) -> Kita utamakan Golden Ratio (0.618)
-            total_score = (hits_618 * 1.5) + (hits_050 * 1.0) + (hits_382 * 0.8)
-            
-            if total_score > best_score:
-                best_score = total_score
-                best_anchors = (l, h)
-    
-    results['FIBO_ANCHORS'] = best_anchors
+    # 5. OPTIMIZE FIBO (Full Data Context for Anchors)
+    try:
+        mid = len(df) // 2
+        orig_l, orig_h = df['Low'].min(), df['High'].max()
+        future_lows = df['Low'].iloc[mid:].values 
+        res_fibo = minimize(loss_fibo, x0=[orig_l, orig_h], args=(future_lows, orig_l, orig_h), method='Nelder-Mead', tol=0.1)
+        results['FIBO_ANCHORS'] = (res_fibo.x[0], res_fibo.x[1])
+    except: 
+        results['FIBO_ANCHORS'] = (df['Low'].min(), df['High'].max())
     
     return results
 # ==========================================
@@ -746,5 +695,6 @@ with col1:
 
 # Render Text Report in Code Block (Better CSS)
 st.code(final_report, language="yaml")
+
 
 
