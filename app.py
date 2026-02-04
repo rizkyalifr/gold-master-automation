@@ -350,86 +350,172 @@ def calculate_fibonacci_levels(df, anchors):
 
 # --- SCORING ENGINE (DETAILED MATRIX VIEW) ---
 def calculate_mtf_quant_score(row_4h, prev_row_4h, price_curr, poc_daily, fibo_golden, opt_params):
+
     scores = {}
     details = {}
     bullish_flags = 0
 
-    # 1. EMA (Using 4H Trend)
-    ema_4h = row_4h['EMA200']
-    dist_pct = ((price_curr - ema_4h) / ema_4h) * 100
-    if dist_pct >= 1.5: score_ema = 100 
-    elif 0.5 <= dist_pct < 1.5: score_ema = 85
-    elif -0.5 <= dist_pct < 0.5: score_ema = 55
-    elif -1.5 <= dist_pct < -0.5: score_ema = 40
-    else: score_ema = 30 
+    # =====================================
+    # 1. EMA TREND + MICRO SLOPE CONFIRM
+    # =====================================
+    ema_now = row_4h['EMA200']
+    ema_prev = prev_row_4h['EMA200']
+
+    dist_pct = ((price_curr - ema_now) / ema_now) * 100
+    ema_slope = ema_now - ema_prev
+
+    if dist_pct >= 1.5 and ema_slope > 0:
+        score_ema = 100
+    elif dist_pct >= 0.5:
+        score_ema = 80
+    elif -0.5 <= dist_pct < 0.5:
+        score_ema = 55
+    elif dist_pct < -0.5 and ema_slope < 0:
+        score_ema = 35
+    else:
+        score_ema = 45
+
     scores['EMA'] = score_ema
-    # Detail: Show Price vs EMA Value
-    details['EMA'] = f"Price ${price_curr:.0f} vs EMA ${ema_4h:.0f} ({dist_pct:+.1f}%)"
-    if score_ema >= 55: bullish_flags += 1
+    details['EMA'] = f"Dist {dist_pct:+.1f}% | Slope {ema_slope:+.2f}"
 
-    # 2. VPVR POC (Using DAILY Structure)
-    if price_curr > poc_daily: score_vpvr = 100 
-    elif abs(price_curr - poc_daily)/poc_daily < 0.03: score_vpvr = 60 
-    else: score_vpvr = 30 
+    if score_ema >= 55:
+        bullish_flags += 1
+
+    # =====================================
+    # 2. VPVR STRUCTURE DAILY
+    # =====================================
+    dist_poc = abs(price_curr - poc_daily) / poc_daily
+
+    if price_curr > poc_daily:
+        score_vpvr = 100
+    elif dist_poc < 0.02:
+        score_vpvr = 65
+    else:
+        score_vpvr = 30
+
     scores['VPVR'] = score_vpvr
-    pos_txt = "Above" if price_curr > poc_daily else "Below"
-    details['VPVR'] = f"{pos_txt} POC Daily (${poc_daily:.0f})"
-    if score_vpvr >= 60: bullish_flags += 1
+    details['VPVR'] = f"POC ${poc_daily:.0f}"
 
-    # 3. MACD (Detailed: Hist, Macd, Signal)
+    if score_vpvr >= 65:
+        bullish_flags += 1
+
+    # =====================================
+    # 3. MACD MOMENTUM + ACCELERATION
+    # =====================================
     hist = row_4h['MACD_Hist']
-    macd_val = row_4h['MACD']
-    sig_val = row_4h['MACD_Signal']
     prev_hist = prev_row_4h['MACD_Hist']
-    
-    if hist > 0 and hist > prev_hist: score_macd = 100
-    elif hist > 0: score_macd = 70
-    elif hist < 0 and hist > prev_hist: score_macd = 50
-    else: score_macd = 30
-    scores['MACD'] = score_macd
-    # Detail: Show Hist + Line + Signal
-    details['MACD'] = f"Hist: {hist:+.1f} | M: {macd_val:.1f} | S: {sig_val:.1f}"
-    if score_macd >= 70: bullish_flags += 1
 
-    # 4. Stoch RSI (Detailed: K & D)
+    accel = hist - prev_hist
+
+    if hist > 0 and accel > 0:
+        score_macd = 100
+    elif hist > 0:
+        score_macd = 75
+    elif hist < 0 and accel > 0:
+        score_macd = 55
+    else:
+        score_macd = 30
+
+    scores['MACD'] = score_macd
+    details['MACD'] = f"Hist {hist:+.2f} | Accel {accel:+.2f}"
+
+    if score_macd >= 75:
+        bullish_flags += 1
+
+    # =====================================
+    # 4. STOCH RSI CROSS DIRECTION
+    # =====================================
     k = row_4h['STOCHRSIk']
     d = row_4h['STOCHRSId']
-    if k < 20 and k > d: score_stoch = 90
-    elif k < 20: score_stoch = 65
-    elif k > 80: score_stoch = 35
-    else: score_stoch = 50
+    prev_k = prev_row_4h['STOCHRSIk']
+    prev_d = prev_row_4h['STOCHRSId']
+
+    bullish_cross = k > d and prev_k <= prev_d
+    bearish_cross = k < d and prev_k >= prev_d
+
+    if bullish_cross and k < 25:
+        score_stoch = 90
+    elif k < 25:
+        score_stoch = 65
+    elif bearish_cross and k > 75:
+        score_stoch = 30
+    elif k > 75:
+        score_stoch = 40
+    else:
+        score_stoch = 55
+
     scores['STOCH'] = score_stoch
-    # Detail: Show K & D
-    status_stoch = "OB" if k > 80 else "OS" if k < 20 else "N"
-    details['STOCH'] = f"K: {k:.1f} | D: {d:.1f} ({status_stoch})"
-    if score_stoch >= 65: bullish_flags += 1
+    details['STOCH'] = f"K {k:.1f} | D {d:.1f}"
 
-    # 5. Bollinger (Using 4H Volatility)
-    if price_curr <= row_4h['BBL']: score_bb = 85
-    elif price_curr < row_4h['BBM']: score_bb = 65
-    elif price_curr < row_4h['BBU']: score_bb = 35
-    else: score_bb = 20
+    if score_stoch >= 65:
+        bullish_flags += 1
+
+    # =====================================
+    # 5. BOLLINGER VOLATILITY EXPANSION
+    # =====================================
+    bb_width_now = row_4h['BB_Width']
+    bb_width_prev = prev_row_4h['BB_Width']
+
+    expansion = bb_width_now > bb_width_prev
+
+    if price_curr <= row_4h['BBL']:
+        score_bb = 85
+    elif price_curr < row_4h['BBM'] and expansion:
+        score_bb = 70
+    elif price_curr < row_4h['BBU']:
+        score_bb = 40
+    else:
+        score_bb = 20
+
     scores['BB'] = score_bb
-    # Detail: Show Range
-    details['BB'] = f"Band: ${row_4h['BBL']:.0f} - ${row_4h['BBU']:.0f}"
-    if score_bb >= 65: bullish_flags += 1
+    details['BB'] = f"Width {bb_width_now:.3f}"
 
-    # 6. Fibonacci (Using DAILY Structure)
-    dist_fibo_pct = abs((price_curr - fibo_golden) / fibo_golden) * 100
-    if dist_fibo_pct <= 1.5: score_fibo = 90
-    elif price_curr > fibo_golden: score_fibo = 55
-    elif price_curr < fibo_golden * 0.95: score_fibo = 40
-    else: score_fibo = 75
+    if score_bb >= 65:
+        bullish_flags += 1
+
+    # =====================================
+    # 6. FIBONACCI STRUCTURE
+    # =====================================
+    dist_fibo_pct = abs(price_curr - fibo_golden) / fibo_golden * 100
+
+    if dist_fibo_pct <= 1.5:
+        score_fibo = 95
+    elif price_curr > fibo_golden:
+        score_fibo = 60
+    elif price_curr < fibo_golden * 0.95:
+        score_fibo = 35
+    else:
+        score_fibo = 75
+
     scores['FIBO'] = score_fibo
-    details['FIBO'] = f"Target Golden: ${fibo_golden:.0f} (Dist {dist_fibo_pct:.1f}%)"
-    if score_fibo >= 55: bullish_flags += 1
+    details['FIBO'] = f"Golden ${fibo_golden:.0f}"
 
+    if score_fibo >= 60:
+        bullish_flags += 1
+
+    # =====================================
+    # 🔥 TREND ALIGNMENT BONUS
+    # =====================================
+    trend_bonus = 0
+    if bullish_flags >= 4:
+        trend_bonus = 5
+    elif bullish_flags <= 2:
+        trend_bonus = -5
+
+    # =====================================
+    # FINAL SCORE
+    # =====================================
     final_score = (
-        (scores['EMA'] * 0.30) + (scores['VPVR'] * 0.20) + (scores['MACD'] * 0.15) +
-        (scores['STOCH'] * 0.10) + (scores['BB'] * 0.10) + (scores['FIBO'] * 0.15)
-    )
-    
+        (scores['EMA'] * 0.30) +
+        (scores['VPVR'] * 0.20) +
+        (scores['MACD'] * 0.15) +
+        (scores['STOCH'] * 0.10) +
+        (scores['BB'] * 0.10) +
+        (scores['FIBO'] * 0.15)
+    ) + trend_bonus
+
     return final_score, scores, details, bullish_flags
+
 
 # --- DATA ENGINE (ROBUST & EXTENDED) ---
 @st.cache_data(ttl=300, show_spinner=False)
@@ -752,6 +838,7 @@ with col1:
 
 # Render Text Report in Code Block (Better CSS)
 st.code(final_report, language="yaml")
+
 
 
 
