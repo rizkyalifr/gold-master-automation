@@ -297,6 +297,7 @@ def calculate_fibonacci_levels(df, anchors):
 # 3. SCORING ENGINE (MTF HYBRID)
 # ==========================================
 
+# --- SCORING ENGINE (DETAILED MATRIX VIEW) ---
 def calculate_mtf_quant_score(row_4h, prev_row_4h, price_curr, poc_daily, fibo_golden, opt_params):
     scores = {}
     details = {}
@@ -305,13 +306,14 @@ def calculate_mtf_quant_score(row_4h, prev_row_4h, price_curr, poc_daily, fibo_g
     # 1. EMA (Using 4H Trend)
     ema_4h = row_4h['EMA200']
     dist_pct = ((price_curr - ema_4h) / ema_4h) * 100
-    if dist_pct >= 1.5: score_ema = 100 # Adjusted for 4H sensitivity
+    if dist_pct >= 1.5: score_ema = 100 
     elif 0.5 <= dist_pct < 1.5: score_ema = 85
     elif -0.5 <= dist_pct < 0.5: score_ema = 55
     elif -1.5 <= dist_pct < -0.5: score_ema = 40
     else: score_ema = 30 
     scores['EMA'] = score_ema
-    details['EMA'] = f"AI-EMA4H({opt_params['EMA']}) | Price vs EMA {dist_pct:+.1f}%"
+    # Detail: Show Price vs EMA Value
+    details['EMA'] = f"Price ${price_curr:.0f} vs EMA ${ema_4h:.0f} ({dist_pct:+.1f}%)"
     if score_ema >= 55: bullish_flags += 1
 
     # 2. VPVR POC (Using DAILY Structure)
@@ -319,23 +321,26 @@ def calculate_mtf_quant_score(row_4h, prev_row_4h, price_curr, poc_daily, fibo_g
     elif abs(price_curr - poc_daily)/poc_daily < 0.03: score_vpvr = 60 
     else: score_vpvr = 30 
     scores['VPVR'] = score_vpvr
-    pos_txt = "Above Wall" if price_curr > poc_daily else "Below Wall"
-    details['VPVR'] = f"Daily {pos_txt} | POC: ${poc_daily:.0f}"
+    pos_txt = "Above" if price_curr > poc_daily else "Below"
+    details['VPVR'] = f"{pos_txt} POC Daily (${poc_daily:.0f})"
     if score_vpvr >= 60: bullish_flags += 1
 
-    # 3. MACD (Using 4H Momentum)
+    # 3. MACD (Detailed: Hist, Macd, Signal)
     hist = row_4h['MACD_Hist']
+    macd_val = row_4h['MACD']
+    sig_val = row_4h['MACD_Signal']
     prev_hist = prev_row_4h['MACD_Hist']
+    
     if hist > 0 and hist > prev_hist: score_macd = 100
     elif hist > 0: score_macd = 70
     elif hist < 0 and hist > prev_hist: score_macd = 50
     else: score_macd = 30
     scores['MACD'] = score_macd
-    p = opt_params['MACD']
-    details['MACD'] = f"AI-MACD4H({p[0]},{p[1]},{p[2]}) | Hist: {hist:+.2f}"
+    # Detail: Show Hist + Line + Signal
+    details['MACD'] = f"Hist: {hist:+.1f} | M: {macd_val:.1f} | S: {sig_val:.1f}"
     if score_macd >= 70: bullish_flags += 1
 
-    # 4. Stoch RSI (Using 4H Oscillator)
+    # 4. Stoch RSI (Detailed: K & D)
     k = row_4h['STOCHRSIk']
     d = row_4h['STOCHRSId']
     if k < 20 and k > d: score_stoch = 90
@@ -343,8 +348,9 @@ def calculate_mtf_quant_score(row_4h, prev_row_4h, price_curr, poc_daily, fibo_g
     elif k > 80: score_stoch = 35
     else: score_stoch = 50
     scores['STOCH'] = score_stoch
-    p = opt_params['STOCH']
-    details['STOCH'] = f"AI-Stoch4H({p[0]},{p[1]},{p[2]}) | K: {k:.1f}"
+    # Detail: Show K & D
+    status_stoch = "OB" if k > 80 else "OS" if k < 20 else "N"
+    details['STOCH'] = f"K: {k:.1f} | D: {d:.1f} ({status_stoch})"
     if score_stoch >= 65: bullish_flags += 1
 
     # 5. Bollinger (Using 4H Volatility)
@@ -353,8 +359,8 @@ def calculate_mtf_quant_score(row_4h, prev_row_4h, price_curr, poc_daily, fibo_g
     elif price_curr < row_4h['BBU']: score_bb = 35
     else: score_bb = 20
     scores['BB'] = score_bb
-    p = opt_params['BB']
-    details['BB'] = f"AI-BB4H({p[0]},{p[1]:.1f}) | Range: ${row_4h['BBL']:.0f}-${row_4h['BBU']:.0f}"
+    # Detail: Show Range
+    details['BB'] = f"Band: ${row_4h['BBL']:.0f} - ${row_4h['BBU']:.0f}"
     if score_bb >= 65: bullish_flags += 1
 
     # 6. Fibonacci (Using DAILY Structure)
@@ -364,7 +370,7 @@ def calculate_mtf_quant_score(row_4h, prev_row_4h, price_curr, poc_daily, fibo_g
     elif price_curr < fibo_golden * 0.95: score_fibo = 40
     else: score_fibo = 75
     scores['FIBO'] = score_fibo
-    details['FIBO'] = f"AI-Fibo Daily | Dist Golden: {dist_fibo_pct:.1f}%"
+    details['FIBO'] = f"Target Golden: ${fibo_golden:.0f} (Dist {dist_fibo_pct:.1f}%)"
     if score_fibo >= 55: bullish_flags += 1
 
     final_score = (
@@ -695,6 +701,7 @@ with col1:
 
 # Render Text Report in Code Block (Better CSS)
 st.code(final_report, language="yaml")
+
 
 
 
