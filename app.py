@@ -167,14 +167,36 @@ def loss_stoch_rsi(params, df):
     profits = (exits.values[:n] - entries.values[:n]) / entries.values[:n]
     return -np.sum(profits)
 
-# --- AI RUNNER (SMART FIBO SCANNER) ---
+# --- HELPER: FIBO SCORE CALCULATOR ---
+def get_fibo_quality_score(df, high, low):
+    # Fungsi untuk menilai seberapa valid sebuah range Fibo
+    if high <= low: return -1
+    diff = high - low
+    levels = [high - (diff * 0.618), high - (diff * 0.5), high - (diff * 0.382)]
+    
+    closes = df['Close'].values
+    score = 0
+    tolerance = diff * 0.015 # Toleransi 1.5%
+    
+    # Cek setiap level, ada berapa candle yang closing-nya nempel area itu
+    for lvl in levels:
+        # Hitung jumlah pantulan di level ini
+        hits = np.sum(np.abs(closes - lvl) < tolerance)
+        score += hits
+        
+    # Normalize score by length (biar fair antara range pendek vs panjang)
+    # Kita cari "Kepadatan" pantulan (Density)
+    density_score = score / len(df) if len(df) > 0 else 0
+    return density_score
+
+# --- AI RUNNER (RANGE + ANCHOR OPTIMIZER) ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def run_ai_optimizer(df_daily, df_4h):
     # FALLBACK: Jika df_4h kosong/sedikit, gunakan df_daily untuk semua
     use_4h_for_momentum = len(df_4h) > 200
     df_momentum = df_4h if use_4h_for_momentum else df_daily
     
-    # 1. SETUP TRAINING DATA
+    # 1. SETUP TRAINING DATA (Momentum)
     split_mom = int(len(df_momentum) * 0.8)
     train_mom = df_momentum.iloc[:split_mom].copy()
     
@@ -185,7 +207,7 @@ def run_ai_optimizer(df_daily, df_4h):
     results = {}
     
     # 2. OPTIMIZE MOMENTUM (EMA, BB, MACD, STOCH)
-    # --- Bagian ini tetap sama seperti sebelumnya ---
+    # (Bagian ini tidak berubah)
     try:
         res_ema = minimize(loss_ema, x0=[200], args=(train_mom, train_mom['Low'].iloc[low_idx], low_idx), method='Nelder-Mead', tol=1.0)
         results['EMA'] = int(res_ema.x[0])
@@ -206,14 +228,43 @@ def run_ai_optimizer(df_daily, df_4h):
         results['STOCH'] = (int(res_stoch.x[0]), int(res_stoch.x[1]), int(res_stoch.x[2]))
     except: results['STOCH'] = (14, 3, 3)
 
-    # 5. OPTIMIZE FIBO (Full Data Context for Anchors)
+    # 3. OPTIMIZE FIBO (RANGE + ANCHOR SELECTOR)
+    # ------------------------------------------
+    # Step A: Range Selection (Grid Search)
+    # Kita tes beberapa window candle: 30(1bln), 90(3bln), 180(6bln), 365(1thn)
+    candidate_windows = [60, 90, 180, 250, 365]
+    best_window_data = df_daily.tail(250) # Default fallback
+    best_range_score = -1
+    
     try:
-        mid = len(df_daily) // 2
-        orig_l, orig_h = df_daily['Low'].min(), df_daily['High'].max()
-        future_lows = df_daily['Low'].iloc[mid:].values 
+        for w in candidate_windows:
+            if len(df_daily) < w: continue
+            
+            # Ambil potongan data
+            temp_df = df_daily.tail(w)
+            temp_l = temp_df['Low'].min()
+            temp_h = temp_df['High'].max()
+            
+            # Hitung skor kualitas (seberapa sering level fibo disentuh)
+            score = get_fibo_quality_score(temp_df, temp_h, temp_l)
+            
+            # Logic: Jika score lebih tinggi, atau score mirip tapi range lebih panjang (prioritas struktur besar)
+            if score > best_range_score:
+                best_range_score = score
+                best_window_data = temp_df
+
+        # Step B: Fine Tuning Anchor pada Range Terbaik (Minimize)
+        # Sekarang kita jalankan optimizer presisi di range yang sudah dipilih tadi
+        mid = len(best_window_data) // 2
+        orig_l = best_window_data['Low'].min()
+        orig_h = best_window_data['High'].max()
+        future_lows = best_window_data['Low'].iloc[mid:].values
+        
         res_fibo = minimize(loss_fibo, x0=[orig_l, orig_h], args=(future_lows, orig_l, orig_h), method='Nelder-Mead', tol=0.1)
         results['FIBO_ANCHORS'] = (res_fibo.x[0], res_fibo.x[1])
-    except: 
+        
+    except:
+        # Emergency Fallback
         results['FIBO_ANCHORS'] = (df_daily['Low'].min(), df_daily['High'].max())
     
     return results
@@ -701,6 +752,7 @@ with col1:
 
 # Render Text Report in Code Block (Better CSS)
 st.code(final_report, language="yaml")
+
 
 
 
