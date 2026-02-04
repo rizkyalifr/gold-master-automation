@@ -443,7 +443,7 @@ def send_telegram_alert(token, chat_id, message):
     except Exception as e:
         return False, str(e)
 
-# --- REPORT GENERATOR (MTF LOGIC) ---
+# --- REPORT GENERATOR (MTF LOGIC - FIXED) ---
 def generate_mtf_report(df_daily, df_4h, kurs, ai_params):
     # Data 4H (Momentum)
     last_4h = df_4h.iloc[-1]
@@ -501,10 +501,10 @@ def generate_mtf_report(df_daily, df_4h, kurs, ai_params):
         sell_reason = "Overbought at Resistance"
         sell_pct = 20
 
-    # 4. BUY LOGIC & SIZING
+    # 4. BUY LOGIC & SIZING (FIXED HERE)
     dana_market = 0
     dana_limit = 0
-    decision_title = ""
+    decision_title = "" 
     prob_desc = ""
     
     if action_type == "BUY":
@@ -532,9 +532,13 @@ def generate_mtf_report(df_daily, df_4h, kurs, ai_params):
 
         dana_market = MODAL_GAJI * alloc_market
         dana_limit = MODAL_GAJI * alloc_limit
+        
+    else: # === INI YANG DITAMBAHKAN ===
+        # Jika Action Type == SELL, kita isi title-nya
+        decision_title = "🚨 SELL / TAKE PROFIT"
+        prob_desc = sell_reason # Alasan sell masuk ke logic description
 
     # 5. SMART LIMIT (Uses DAILY Support for better safety)
-    # We calculate Daily EMA just for Limit support reference
     ema_daily_val = df_daily['Close'].ewm(span=ai_params['EMA'], adjust=False).mean().iloc[-1]
     
     candidates = [
@@ -697,3 +701,4 @@ with col1:
 
 # Render Text Report in Code Block (Better CSS)
 st.code(final_report, language="yaml")
+
