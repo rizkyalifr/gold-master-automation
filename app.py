@@ -684,7 +684,7 @@ with st.status("🦅 AI MTF Brain Initialization...", expanded=True) as status:
     
     st.write("🧠 Training AI Model on Split Timeframes...")
     # PASS BOTH DATAFRAMES TO OPTIMIZER
-    ai_params = run_ai_optimizer(paxg_d_raw.tail(250), paxg_4h_raw)
+    ai_params = run_ai_optimizer(paxg_d_raw, paxg_4h_raw)
     
     st.write("⚙️ Applying Optimized Parameters to Contexts...")
     # Process separately
@@ -752,6 +752,7 @@ with col1:
 
 # Render Text Report in Code Block (Better CSS)
 st.code(final_report, language="yaml")
+
 
 
 
