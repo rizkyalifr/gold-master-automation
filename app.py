@@ -14,7 +14,7 @@ import time
 warnings.filterwarnings("ignore")
 
 # --- KONFIGURASI HALAMAN ---
-st.set_page_config(page_title="Gold Master V6 AI Enhanced", page_icon="🦅", layout="wide")
+st.set_page_config(page_title="Gold Master V6 MTF Edition", page_icon="🦅", layout="wide")
 
 # --- CSS PRO ---
 st.markdown("""
@@ -51,7 +51,7 @@ def fmt_idr(val): return f"Rp {val:,.0f}".replace(",", ".")
 def fmt_usd(val): return f"${val:,.2f}"
 
 # ==========================================
-# 1. AI OPTIMIZATION ENGINE (WALK-FORWARD)
+# 1. AI OPTIMIZATION ENGINE (MULTI-TIMEFRAME)
 # ==========================================
 
 # --- LOSS FUNCTIONS (STRICT BOUNDS) ---
@@ -167,53 +167,59 @@ def loss_stoch_rsi(params, df):
     profits = (exits.values[:n] - entries.values[:n]) / entries.values[:n]
     return -np.sum(profits)
 
-# --- AI RUNNER (OPTIMIZED) ---
+# --- AI RUNNER (MTF OPTIMIZED) ---
 @st.cache_data(ttl=3600, show_spinner=False)
-def run_ai_optimizer(df):
-    # Split Data: Train (70%) vs Validation (30%)
-    # Agar tidak overfitting, kita optimasi di data lama, lalu test di data baru.
-    split_idx = int(len(df) * 0.8)
-    train_df = df.iloc[:split_idx].copy()
+def run_ai_optimizer(df_daily, df_4h):
+    # FALLBACK: Jika df_4h kosong/sedikit, gunakan df_daily untuk semua
+    use_4h_for_momentum = len(df_4h) > 200
+    df_momentum = df_4h if use_4h_for_momentum else df_daily
     
-    # Prepare Pivot Data for Train
-    high_idx = argrelextrema(train_df['High'].values, np.greater, order=5)[0]
-    low_idx = argrelextrema(train_df['Low'].values, np.less, order=5)[0]
+    # 1. SETUP TRAINING DATA (Momentum on 4H/Daily, Fibo on Daily)
+    split_mom = int(len(df_momentum) * 0.8)
+    train_mom = df_momentum.iloc[:split_mom].copy()
+    
+    # Pivot for BB/EMA logic on Momentum DF
+    high_idx = argrelextrema(train_mom['High'].values, np.greater, order=5)[0]
+    low_idx = argrelextrema(train_mom['Low'].values, np.less, order=5)[0]
     
     results = {}
     
-    # 1. OPTIMIZE EMA
+    # 2. OPTIMIZE MOMENTUM (EMA, BB, MACD, STOCH)
+    # -------------------------------------------
+    # A. EMA (Trend on 4H)
     try:
-        res_ema = minimize(loss_ema, x0=[200], args=(train_df, train_df['Low'].iloc[low_idx], low_idx), method='Nelder-Mead', tol=1.0)
+        res_ema = minimize(loss_ema, x0=[200], args=(train_mom, train_mom['Low'].iloc[low_idx], low_idx), method='Nelder-Mead', tol=1.0)
         results['EMA'] = int(res_ema.x[0])
-    except: results['EMA'] = 200 # Fallback
+    except: results['EMA'] = 200
 
-    # 2. OPTIMIZE BB
+    # B. BB (Volatility on 4H)
     try:
-        res_bb = minimize(loss_bb, x0=[20, 2.0], args=(train_df, high_idx, low_idx), method='Nelder-Mead', tol=0.1)
+        res_bb = minimize(loss_bb, x0=[20, 2.0], args=(train_mom, high_idx, low_idx), method='Nelder-Mead', tol=0.1)
         results['BB'] = (int(res_bb.x[0]), res_bb.x[1])
     except: results['BB'] = (20, 2.0)
 
-    # 3. OPTIMIZE MACD
+    # C. MACD (Momentum on 4H)
     try:
-        res_macd = minimize(loss_macd, x0=[12, 26, 9], args=(train_df,), method='Nelder-Mead', tol=0.1)
+        res_macd = minimize(loss_macd, x0=[12, 26, 9], args=(train_mom,), method='Nelder-Mead', tol=0.1)
         results['MACD'] = (int(res_macd.x[0]), int(res_macd.x[1]), int(res_macd.x[2]))
     except: results['MACD'] = (12, 26, 9)
 
-    # 4. OPTIMIZE STOCH
+    # D. STOCH (Oscillator on 4H)
     try:
-        res_stoch = minimize(loss_stoch_rsi, x0=[14, 3, 3], args=(train_df,), method='Nelder-Mead', tol=0.1)
+        res_stoch = minimize(loss_stoch_rsi, x0=[14, 3, 3], args=(train_mom,), method='Nelder-Mead', tol=0.1)
         results['STOCH'] = (int(res_stoch.x[0]), int(res_stoch.x[1]), int(res_stoch.x[2]))
     except: results['STOCH'] = (14, 3, 3)
 
-    # 5. OPTIMIZE FIBO (Full Data Context for Anchors)
+    # 3. OPTIMIZE STRUCTURE (FIBO on DAILY)
+    # -------------------------------------
     try:
-        mid = len(df) // 2
-        orig_l, orig_h = df['Low'].min(), df['High'].max()
-        future_lows = df['Low'].iloc[mid:].values 
+        mid = len(df_daily) // 2
+        orig_l, orig_h = df_daily['Low'].min(), df_daily['High'].max()
+        future_lows = df_daily['Low'].iloc[mid:].values 
         res_fibo = minimize(loss_fibo, x0=[orig_l, orig_h], args=(future_lows, orig_l, orig_h), method='Nelder-Mead', tol=0.1)
         results['FIBO_ANCHORS'] = (res_fibo.x[0], res_fibo.x[1])
     except: 
-        results['FIBO_ANCHORS'] = (df['Low'].min(), df['High'].max())
+        results['FIBO_ANCHORS'] = (df_daily['Low'].min(), df_daily['High'].max())
     
     return results
 
@@ -221,7 +227,7 @@ def run_ai_optimizer(df):
 # 2. DATA PROCESSING
 # ==========================================
 
-def process_data_ai(df, params):
+def process_data_indicators(df, params):
     df = df.copy()
     
     # 1. AI EMA
@@ -239,7 +245,6 @@ def process_data_ai(df, params):
     bbu = df['BBU'].fillna(method='bfill')
     bbl = df['BBL'].fillna(method='bfill')
     bbm = df['BBM'].fillna(method='bfill')
-    # Avoid division by zero
     bbm = bbm.replace(0, 0.0001)
     df['BB_Width'] = (bbu - bbl) / bbm
     
@@ -295,78 +300,77 @@ def calculate_fibonacci_levels(df, anchors):
     }
 
 # ==========================================
-# 3. SCORING ENGINE (UNCHANGED OUTPUT LOGIC)
+# 3. SCORING ENGINE (MTF HYBRID)
 # ==========================================
 
-def calculate_quant_score(row, prev_row, poc, fibo_golden, opt_params):
-    price = row['Close']
+def calculate_mtf_quant_score(row_4h, prev_row_4h, price_curr, poc_daily, fibo_golden, opt_params):
     scores = {}
     details = {}
     bullish_flags = 0
 
-    # 1. EMA
-    ema = row['EMA200']
-    dist_pct = ((price - ema) / ema) * 100
-    if dist_pct >= 12: score_ema = 100
-    elif 8 <= dist_pct < 12: score_ema = 85
-    elif 4 <= dist_pct < 8: score_ema = 70
-    elif 0 <= dist_pct < 4: score_ema = 55
+    # 1. EMA (Using 4H Trend)
+    ema_4h = row_4h['EMA200']
+    dist_pct = ((price_curr - ema_4h) / ema_4h) * 100
+    if dist_pct >= 1.5: score_ema = 100 # Adjusted for 4H sensitivity
+    elif 0.5 <= dist_pct < 1.5: score_ema = 85
+    elif -0.5 <= dist_pct < 0.5: score_ema = 55
+    elif -1.5 <= dist_pct < -0.5: score_ema = 40
     else: score_ema = 30 
     scores['EMA'] = score_ema
-    details['EMA'] = f"AI-EMA({opt_params['EMA']}) | Price ${price:.0f} vs EMA ${ema:.0f} ({dist_pct:+.1f}%)"
+    details['EMA'] = f"AI-EMA4H({opt_params['EMA']}) | Price vs EMA {dist_pct:+.1f}%"
     if score_ema >= 55: bullish_flags += 1
 
-    # 2. VPVR POC
-    if price > poc: score_vpvr = 100 
-    elif abs(price - poc)/poc < 0.03: score_vpvr = 60 
+    # 2. VPVR POC (Using DAILY Structure)
+    if price_curr > poc_daily: score_vpvr = 100 
+    elif abs(price_curr - poc_daily)/poc_daily < 0.03: score_vpvr = 60 
     else: score_vpvr = 30 
     scores['VPVR'] = score_vpvr
-    pos_txt = "Above Wall" if price > poc else "Below Wall"
-    details['VPVR'] = f"{pos_txt} | POC: ${poc:.0f}"
+    pos_txt = "Above Wall" if price_curr > poc_daily else "Below Wall"
+    details['VPVR'] = f"Daily {pos_txt} | POC: ${poc_daily:.0f}"
     if score_vpvr >= 60: bullish_flags += 1
 
-    # 3. MACD
-    hist = row['MACD_Hist']
-    prev_hist = prev_row['MACD_Hist']
+    # 3. MACD (Using 4H Momentum)
+    hist = row_4h['MACD_Hist']
+    prev_hist = prev_row_4h['MACD_Hist']
     if hist > 0 and hist > prev_hist: score_macd = 100
     elif hist > 0: score_macd = 70
     elif hist < 0 and hist > prev_hist: score_macd = 50
     else: score_macd = 30
     scores['MACD'] = score_macd
     p = opt_params['MACD']
-    details['MACD'] = f"AI-MACD({p[0]},{p[1]},{p[2]}) | Hist: {hist:+.2f}"
+    details['MACD'] = f"AI-MACD4H({p[0]},{p[1]},{p[2]}) | Hist: {hist:+.2f}"
     if score_macd >= 70: bullish_flags += 1
 
-    # 4. Stoch RSI
-    k = row['STOCHRSIk']
-    d = row['STOCHRSId']
+    # 4. Stoch RSI (Using 4H Oscillator)
+    k = row_4h['STOCHRSIk']
+    d = row_4h['STOCHRSId']
     if k < 20 and k > d: score_stoch = 90
     elif k < 20: score_stoch = 65
     elif k > 80: score_stoch = 35
     else: score_stoch = 50
     scores['STOCH'] = score_stoch
     p = opt_params['STOCH']
-    details['STOCH'] = f"AI-Stoch({p[0]},{p[1]},{p[2]}) | K: {k:.1f} | D: {d:.1f}"
+    details['STOCH'] = f"AI-Stoch4H({p[0]},{p[1]},{p[2]}) | K: {k:.1f}"
     if score_stoch >= 65: bullish_flags += 1
 
-    # 5. Bollinger
-    if price <= row['BBL']: score_bb = 85
-    elif price < row['BBM']: score_bb = 65
-    elif price < row['BBU']: score_bb = 35
+    # 5. Bollinger (Using 4H Volatility)
+    if price_curr <= row_4h['BBL']: score_bb = 85
+    elif price_curr < row_4h['BBM']: score_bb = 65
+    elif price_curr < row_4h['BBU']: score_bb = 35
     else: score_bb = 20
     scores['BB'] = score_bb
     p = opt_params['BB']
-    details['BB'] = f"AI-BB({p[0]},{p[1]:.1f}) | Up: ${row['BBU']:.0f} | Low: ${row['BBL']:.0f}"
+    details['BB'] = f"AI-BB4H({p[0]},{p[1]:.1f}) | Range: ${row_4h['BBL']:.0f}-${row_4h['BBU']:.0f}"
     if score_bb >= 65: bullish_flags += 1
 
-    # 6. Fibonacci
-    dist_fibo_pct = abs((price - fibo_golden) / fibo_golden) * 100
+    # 6. Fibonacci (Using DAILY Structure)
+    dist_fibo_pct = abs((price_curr - fibo_golden) / fibo_golden) * 100
     if dist_fibo_pct <= 1.5: score_fibo = 90
-    elif price > fibo_golden: score_fibo = 55
-    elif price < fibo_golden * 0.95: score_fibo = 40
+    elif price_curr > fibo_golden: score_fibo = 55
+    elif price_curr < fibo_golden * 0.95: score_fibo = 40
     else: score_fibo = 75
     scores['FIBO'] = score_fibo
-    details['FIBO'] = f"AI-Fibo | Dist to Golden: {dist_fibo_pct:.1f}% | Target: ${fibo_golden:.0f}"
+    details['FIBO'] = f"AI-Fibo Daily | Dist Golden: {dist_fibo_pct:.1f}%"
     if score_fibo >= 55: bullish_flags += 1
 
     final_score = (
@@ -376,15 +380,16 @@ def calculate_quant_score(row, prev_row, poc, fibo_golden, opt_params):
     
     return final_score, scores, details, bullish_flags
 
-# --- DATA ENGINE (ROBUST) ---
+# --- DATA ENGINE (ROBUST & EXTENDED) ---
 @st.cache_data(ttl=300, show_spinner=False)
 def get_data_engine():
     # Retry mechanism
     max_retries = 3
     for attempt in range(max_retries):
         try:
+            # Note: Fetch Hourly '1y' to ensure enough 4H candles for 200 EMA
             df_full = yf.download(TICKERS, period="2y", interval="1d", group_by='ticker', progress=False)
-            df_hourly = yf.download(TICKERS, period="1mo", interval="1h", group_by='ticker', progress=False)
+            df_hourly = yf.download(TICKERS, period="1y", interval="1h", group_by='ticker', progress=False)
             
             if not df_full.empty and not df_hourly.empty:
                 break
@@ -408,14 +413,21 @@ def get_data_engine():
             cols = ['Close', 'High', 'Low', 'Open']
             df[cols] = df[cols] * PAXG_MULTIPLIER
 
-        # AI Optimization Trigger
-        # Kita pakai 250 candle terakhir untuk optimasi agar cukup datanya
-        opt_data = paxg_d.tail(250).copy()
+        # PREPARE 4H DATA HERE FOR OPTIMIZER
+        # Resample Hourly to 4H
+        paxg_4h = paxg_h.resample('4h').agg({
+            'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'
+        }).dropna()
+
+        # AI Optimization Trigger (MTF Split)
+        # Train Fibo on Daily, Train Momentum on 4H
+        opt_data_d = paxg_d.tail(365).copy() # 1 Year Daily context
+        opt_data_4h = paxg_4h.tail(500).copy() # ~3 Months 4H context
         
         # NOTE: run_ai_optimizer dipanggil di luar cache data agar UI bisa progress bar
-        # Tapi untuk efisiensi di sini kita return raw data dulu
+        # Tapi kita return raw dataframes
         
-        return paxg_d, paxg_h, float(kurs)
+        return paxg_d, paxg_4h, float(kurs)
 
     except Exception as e:
         return pd.DataFrame(), pd.DataFrame(), 16800, {}
@@ -431,33 +443,46 @@ def send_telegram_alert(token, chat_id, message):
     except Exception as e:
         return False, str(e)
 
-# --- REPORT GENERATOR ---
-def generate_sop_report(df_6mo, df_4h, kurs, ai_params):
-    last_d = df_6mo.iloc[-1]
-    prev_d = df_6mo.iloc[-2]
-    price = last_d['Close']
+# --- REPORT GENERATOR (MTF LOGIC) ---
+def generate_mtf_report(df_daily, df_4h, kurs, ai_params):
+    # Data 4H (Momentum)
+    last_4h = df_4h.iloc[-1]
+    prev_4h = df_4h.iloc[-2]
     
-    fibo = calculate_fibonacci_levels(df_6mo, ai_params['FIBO_ANCHORS']) 
-    poc = get_poc(df_6mo)
+    # Data Daily (Structure)
+    last_d = df_daily.iloc[-1]
+    price = last_4h['Close'] # Use 4H Close for current price precision
     
-    # 1. QUANT SCORE
-    final_score, scores, details, bullish_count = calculate_quant_score(last_d, prev_d, poc, fibo['GOLDEN (0.618)'], ai_params)
+    # Calculate Levels (Daily)
+    fibo = calculate_fibonacci_levels(df_daily, ai_params['FIBO_ANCHORS']) 
+    poc = get_poc(df_daily.tail(180)) # POC based on 6mo daily volume
     
-    # 2. MARKET REGIME
-    ema_dist = ((price - last_d['EMA200']) / last_d['EMA200']) * 100
-    if ema_dist > 5: regime = "🐎 TRENDING BULLISH"
-    elif ema_dist < -5: regime = "🐻 TRENDING BEARISH"
-    else: regime = "🦀 RANGING / SIDEWAYS"
+    # 1. QUANT SCORE (MTF)
+    final_score, scores, details, bullish_count = calculate_mtf_quant_score(
+        last_4h, prev_4h, price, poc, fibo['GOLDEN (0.618)'], ai_params
+    )
     
-    bb_width = last_d.get('BB_Width', 0.1)
+    # 2. MARKET REGIME (Based on 4H Trend)
+    ema_dist = ((price - last_4h['EMA200']) / last_4h['EMA200']) * 100
+    if ema_dist > 1.0: regime = "🐎 TRENDING BULLISH (4H)"
+    elif ema_dist < -1.0: regime = "🐻 TRENDING BEARISH (4H)"
+    else: regime = "🦀 RANGING / SIDEWAYS (4H)"
+    
+    bb_width = last_4h.get('BB_Width', 0.1)
     is_high_vol = bb_width > 0.15
     vol_status = "⚡ HIGH VOLATILITY" if is_high_vol else "🌊 NORMAL/LOW VOL"
+    
+    # Direction Flag (MACD 4H Acceleration)
+    macd_accel = last_4h['MACD_Hist'] - prev_4h['MACD_Hist']
+    if macd_accel > 0: dir_flag = "↗️ UP"
+    elif macd_accel < 0: dir_flag = "↘️ DOWN"
+    else: dir_flag = "➡️ FLAT"
     
     # 3. SELL LOGIC
     action_type = "BUY"
     sell_reason = ""
     sell_pct = 0
-    momentum_decay = last_d['MACD_Hist'] < prev_d['MACD_Hist'] and last_d['MACD_Hist'] > 0
+    momentum_decay = last_4h['MACD_Hist'] < prev_4h['MACD_Hist'] and last_4h['MACD_Hist'] > 0
     
     if final_score < 40: 
         action_type = "SELL"
@@ -465,13 +490,13 @@ def generate_sop_report(df_6mo, df_4h, kurs, ai_params):
         sell_pct = 50 
     elif price >= fibo['MOONBAG (1.618)']:
         action_type = "SELL"
-        sell_reason = "Moonbag Target (1.618)"
+        sell_reason = "Moonbag Target (Daily 1.618)"
         sell_pct = 50
     elif price >= fibo['RESISTANCE (High)'] and momentum_decay:
         action_type = "SELL"
-        sell_reason = "Resistance + Momentum Decay"
+        sell_reason = "Daily Res + 4H Mom Decay"
         sell_pct = 30
-    elif price >= fibo['0.236'] and last_d['STOCHRSIk'] > 80:
+    elif price >= fibo['0.236'] and last_4h['STOCHRSIk'] > 80:
         action_type = "SELL"
         sell_reason = "Overbought at Resistance"
         sell_pct = 20
@@ -486,11 +511,11 @@ def generate_sop_report(df_6mo, df_4h, kurs, ai_params):
         if final_score >= 80:
             alloc_market, alloc_limit = 0.7, 0.3
             decision_title = "🚀 AGGRESSIVE BUY"
-            prob_desc = "High Probability Setup"
+            prob_desc = "High Prob (Structure + Mom)"
         elif 65 <= final_score < 80:
             alloc_market, alloc_limit = 0.5, 0.5
             decision_title = "✅ STANDARD ACCUMULATION"
-            prob_desc = "Moderate/Healthy Trend"
+            prob_desc = "Healthy Trend (MTF Confirmed)"
         elif 50 <= final_score < 65:
             alloc_market, alloc_limit = 0.2, 0.8
             decision_title = "⚠️ SNIPER ENTRY (WAIT DIP)"
@@ -508,10 +533,13 @@ def generate_sop_report(df_6mo, df_4h, kurs, ai_params):
         dana_market = MODAL_GAJI * alloc_market
         dana_limit = MODAL_GAJI * alloc_limit
 
-    # 5. SMART LIMIT
+    # 5. SMART LIMIT (Uses DAILY Support for better safety)
+    # We calculate Daily EMA just for Limit support reference
+    ema_daily_val = df_daily['Close'].ewm(span=ai_params['EMA'], adjust=False).mean().iloc[-1]
+    
     candidates = [
-        {'price': poc, 'label': 'POC'},
-        {'price': last_d['EMA200'], 'label': f"EMA {ai_params['EMA']}"},
+        {'price': poc, 'label': 'POC Daily'},
+        {'price': ema_daily_val, 'label': f"EMA Daily"},
         {'price': fibo['0.382'], 'label': 'Fibo 0.382'},
         {'price': fibo['MID (0.5)'], 'label': 'Fibo 0.5'},
         {'price': fibo['GOLDEN (0.618)'], 'label': 'Golden'}
@@ -551,25 +579,25 @@ def generate_sop_report(df_6mo, df_4h, kurs, ai_params):
    👉 Est. IDR: {fmt_idr(est_limit_idr)}
         """
 
-    report = f"""🦅 GOLD MASTER V6 (AI ENHANCED)
+    report = f"""🦅 GOLD MASTER V6 (MTF EDITION)
 📅 {now.strftime('%d %b %Y | %H:%M WIB')}
 =======================================
 
-💰 **MARKET DATA**
+💰 **MARKET DATA (4H/Daily Hybrid)**
 PAXG : {fmt_usd(price)}
-EMA  : {fmt_usd(last_d['EMA200'])} (Per: {ai_params['EMA']})
+EMA  : {fmt_usd(last_4h['EMA200'])} (4H Trend)
 VOL  : {vol_status}
 
-📊 **MATRIX 6 INDIKATOR (AI OPTIMIZED)**
-1. EMA       [{scores['EMA']}] {details['EMA']}
-2. VPVR POC  [{scores['VPVR']}] {details['VPVR']}
-3. MACD      [{scores['MACD']}] {details['MACD']}
-4. Stoch RSI [{scores['STOCH']}] {details['STOCH']}
-5. Bollinger [{scores['BB']}] {details['BB']}
-6. Fibonacci [{scores['FIBO']}] {details['FIBO']}
+📊 **MATRIX 6 INDIKATOR (MTF)**
+1. EMA        [{scores['EMA']}] {details['EMA']}
+2. VPVR POC   [{scores['VPVR']}] {details['VPVR']}
+3. MACD       [{scores['MACD']}] {details['MACD']}
+4. Stoch RSI  [{scores['STOCH']}] {details['STOCH']}
+5. Bollinger  [{scores['BB']}] {details['BB']}
+6. Fibonacci  [{scores['FIBO']}] {details['FIBO']}
 
 🧮 SCORE: {final_score:.1f}/100 | {agreement}
-🌍 REGIME: {regime}
+🌍 REGIME: {regime} | DIR: {dir_flag}
 =======================================
 🧠 DECISION : [ {decision_title} ]
 🎲 LOGIC    : {prob_desc}
@@ -578,48 +606,48 @@ VOL  : {vol_status}
 📋 **EXECUTION PLAN (MODAL 5 JUTA)**
 {main_action_txt}
 
-🎯 **KEY LEVELS**
+🎯 **KEY LEVELS (DAILY STRUCTURE)**
 """
     sorted_fibo = dict(sorted(fibo.items(), key=lambda item: item[1], reverse=True))
     for k, v in sorted_fibo.items():
         report += f"{k:<15}: {fmt_usd(v)}\n"
         
-    return report, df_6mo, fibo, final_score
+    return report, df_daily, fibo, final_score
 
 # --- MAIN APP ---
-st.title("Gold Master V6 (AI Institutional)")
+st.title("Gold Master V6 (MTF Institutional)")
 
 # --- STATUS BAR (PRO UI) ---
-with st.status("🦅 AI Brain Initialization...", expanded=True) as status:
-    st.write("📡 Fetching Real-time Market Data...")
-    paxg_d_raw, paxg_h_raw, kurs_val = get_data_engine()
+with st.status("🦅 AI MTF Brain Initialization...", expanded=True) as status:
+    st.write("📡 Fetching Multi-Timeframe Data (Daily & Hourly)...")
+    paxg_d_raw, paxg_4h_raw, kurs_val = get_data_engine()
     
-    if paxg_d_raw.empty:
+    if paxg_d_raw.empty or paxg_4h_raw.empty:
         status.update(label="❌ Data Error", state="error")
-        st.error("Gagal mengambil data. Cek koneksi internet.")
+        st.error("Gagal mengambil data. Cek koneksi internet / Yahoo API.")
         st.stop()
     
-    st.write("🧠 Training AI Model on Historical Data...")
-    ai_params = run_ai_optimizer(paxg_d_raw.tail(250))
+    st.write("🧠 Training AI Model on Split Timeframes...")
+    # PASS BOTH DATAFRAMES TO OPTIMIZER
+    ai_params = run_ai_optimizer(paxg_d_raw, paxg_4h_raw)
     
-    st.write("⚙️ Applying Optimized Parameters...")
-    paxg_d = process_data_ai(paxg_d_raw, ai_params)
-    paxg_6mo = paxg_d.tail(180).copy()
-    
-    paxg_4h = paxg_h_raw.resample('4h').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
-    paxg_4h = process_data_ai(paxg_4h, ai_params)
+    st.write("⚙️ Applying Optimized Parameters to Contexts...")
+    # Process separately
+    paxg_d = process_data_indicators(paxg_d_raw, ai_params) # For Fibo context mainly
+    paxg_4h = process_data_indicators(paxg_4h_raw, ai_params) # For Momentum
     
     status.update(label="✅ AI Ready!", state="complete", expanded=False)
 
 # --- REPORT GENERATION ---
-final_report, xau_processed, fib_levels, score_val = generate_sop_report(paxg_6mo, paxg_4h, kurs_val, ai_params)
+# Use MTF Generator
+final_report, xau_daily, fib_levels, score_val = generate_mtf_report(paxg_d, paxg_4h, kurs_val, ai_params)
 
 # --- SIDEBAR ---
-st.sidebar.header("⚙️ AI Parameters")
-st.sidebar.info(f"EMA Period: {ai_params['EMA']}")
-st.sidebar.info(f"BB: Win {ai_params['BB'][0]} | Std {ai_params['BB'][1]:.2f}")
-st.sidebar.info(f"MACD: {ai_params['MACD']}")
-st.sidebar.info(f"Stoch: {ai_params['STOCH']}")
+st.sidebar.header("⚙️ AI MTF Parameters")
+st.sidebar.info(f"4H EMA Period: {ai_params['EMA']}")
+st.sidebar.info(f"4H BB: Win {ai_params['BB'][0]} | Std {ai_params['BB'][1]:.2f}")
+st.sidebar.info(f"4H MACD: {ai_params['MACD']}")
+st.sidebar.info(f"Daily Fibo Anchors: {fmt_usd(ai_params['FIBO_ANCHORS'][0])}-{fmt_usd(ai_params['FIBO_ANCHORS'][1])}")
 
 st.sidebar.header("⚙️ Telegram")
 if "TELEGRAM_TOKEN" in st.secrets:
@@ -631,21 +659,20 @@ else:
 
 st.sidebar.markdown("---")
 score_color = "normal" if score_val >= 65 else "inverse"
-st.sidebar.metric("QUANT SCORE", f"{score_val:.1f}", delta="Strength", delta_color=score_color)
-st.sidebar.metric("PRICE", fmt_usd(xau_processed.iloc[-1]['Close']))
+st.sidebar.metric("QUANT SCORE (MTF)", f"{score_val:.1f}", delta="Strength", delta_color=score_color)
+st.sidebar.metric("PRICE (Realtime)", fmt_usd(paxg_4h.iloc[-1]['Close']))
 
-# --- CHART ---
-st.subheader("Institutional Chart View (AI Optimized)")
-fig = go.Figure(data=[go.Candlestick(x=xau_processed.index,
-                                open=xau_processed['Open'], high=xau_processed['High'],
-                                low=xau_processed['Low'], close=xau_processed['Close'],
+# --- CHART (Using Daily for Structure View, but could switch) ---
+st.subheader("Structural View (Daily Context + Key Levels)")
+# Plotting Daily candles for clearer structure view
+fig = go.Figure(data=[go.Candlestick(x=xau_daily.index,
+                                open=xau_daily['Open'], high=xau_daily['High'],
+                                low=xau_daily['Low'], close=xau_daily['Close'],
                                 name='PAXG/USD')])
 
-# EMA
-fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['EMA200'], line=dict(color='blue', width=2), name=f'EMA {ai_params["EMA"]}'))
-# BB
-fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['BBU'], line=dict(color='red', width=1, dash='dot'), name='Upper BB'))
-fig.add_trace(go.Scatter(x=xau_processed.index, y=xau_processed['BBL'], line=dict(color='green', width=1, dash='dot'), name='Lower BB'))
+# EMA (Daily Reference for Chart)
+ema_d_val = xau_daily['Close'].ewm(span=ai_params['EMA'], adjust=False).mean()
+fig.add_trace(go.Scatter(x=xau_daily.index, y=ema_d_val, line=dict(color='blue', width=2), name=f'EMA {ai_params["EMA"]} (Daily)'))
 
 # Fibo
 colors_fib = {"MOONBAG": "lime", "RESISTANCE": "red", "GOLDEN": "gold", "FLOOR": "white", "MID": "gray"}
@@ -669,6 +696,4 @@ with col1:
             else: st.error(f"Failed: {msg}")
 
 # Render Text Report in Code Block (Better CSS)
-st.code(final_report, language="yaml") # YAML syntax highlighting makes it look nice
-
-
+st.code(final_report, language="yaml")
