@@ -696,9 +696,9 @@ final_report, chart_daily, fib_levels, score_val = generate_mtf_report(
 )
 
 st.sidebar.header("⚙️ AI MTF Parameters")
-st.sidebar.info(f"4H EMA Period: {ai_params['EMA']}")
-st.sidebar.info(f"4H BB: Win {ai_params['BB'][0]} | Std {ai_params['BB'][1]:.2f}")
-st.sidebar.info(f"4H MACD: {ai_params['MACD']}")
+st.sidebar.info(f"EMA Period: {ai_params['EMA']}")
+st.sidebar.info(f"BB: Win {ai_params['BB'][0]} | Std {ai_params['BB'][1]:.2f}")
+st.sidebar.info(f"MACD: {ai_params['MACD']}")
 st.sidebar.info(f"Daily Fibo Anchors: {fmt_usd(ai_params['FIBO_ANCHORS'][0])}-{fmt_usd(ai_params['FIBO_ANCHORS'][1])}")
 
 score_color = "normal" if score_val >= 65 else "inverse"
@@ -748,5 +748,6 @@ with col1:
 
 # Render Text Report
 st.code(final_report, language="yaml")
+
 
 
