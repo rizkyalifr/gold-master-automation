@@ -695,11 +695,11 @@ final_report, chart_daily, fib_levels, score_val = generate_mtf_report(
     df_d, df_mom, kurs_val, ai_params, asset_choice.split()[0], tf_choice
 )
 
-# --- SIDEBAR INFO ---
-st.sidebar.markdown("---")
-st.sidebar.info(f"AI {tf_choice} EMA: {ai_params['EMA']}")
-st.sidebar.info(f"AI {tf_choice} BB: {ai_params['BB']}")
-st.sidebar.info(f"Daily Anchors: {fmt_usd(ai_params['FIBO_ANCHORS'][0])} - {fmt_usd(ai_params['FIBO_ANCHORS'][1])}")
+# # --- SIDEBAR INFO ---
+# st.sidebar.markdown("---")
+# st.sidebar.info(f"AI {tf_choice} EMA: {ai_params['EMA']}")
+# st.sidebar.info(f"AI {tf_choice} BB: {ai_params['BB']}")
+# st.sidebar.info(f"Daily Anchors: {fmt_usd(ai_params['FIBO_ANCHORS'][0])} - {fmt_usd(ai_params['FIBO_ANCHORS'][1])}")
 
 score_color = "normal" if score_val >= 65 else "inverse"
 st.sidebar.metric(f"SCORE ({tf_choice})", f"{score_val:.1f}", delta="Strength", delta_color=score_color)
@@ -748,3 +748,4 @@ with col1:
 
 # Render Text Report
 st.code(final_report, language="yaml")
+
