@@ -14,7 +14,7 @@ import time
 warnings.filterwarnings("ignore")
 
 # --- KONFIGURASI HALAMAN ---
-st.set_page_config(page_title="Gold Master V6 MTF Edition", page_icon="🦅", layout="wide")
+st.set_page_config(page_title="Crypto Master V7 Multi-Asset", page_icon="🦅", layout="wide")
 
 # --- CSS PRO ---
 st.markdown("""
@@ -40,11 +40,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- KONFIGURASI ENGINE ---
-TICKERS = ["PAXG-USD", "IDR=X"]
+# --- KONFIGURASI ENGINE DEFAULT ---
 MODAL_GAJI = 5000000 
 SPREAD_AJAIB = 1.015 
-PAXG_MULTIPLIER = 0.99432278994
+# Multiplier hanya untuk PAXG karena ada selisih harga on-chain vs spot biasa
+PAXG_MULTIPLIER = 0.99432278994 
 
 # --- HELPER FORMATTING ---
 def fmt_idr(val): return f"Rp {val:,.0f}".replace(",", ".")
@@ -57,17 +57,15 @@ def fmt_usd(val): return f"${val:,.2f}"
 # --- LOSS FUNCTIONS (STRICT BOUNDS) ---
 def loss_ema(params, df, pivot_prices, pivot_indices):
     period = int(params[0])
-    # Strict Bounds: EMA di bawah 50 atau di atas 300 dianggap noise/lagging parah
     if period < 50 or period > 300: return 1e12 
     
     ema = df['Close'].ewm(span=period, adjust=False).mean()
     ema_vals = ema.iloc[pivot_indices].values
     
-    # Validasi panjang array
     if len(ema_vals) != len(pivot_prices): return 1e12
     
     diffs = pivot_prices - ema_vals
-    penalty = diffs < -(pivot_prices * 0.01) # Penalty jika harga jebol EMA terlalu dalam
+    penalty = diffs < -(pivot_prices * 0.01)
     error = np.abs(diffs)
     error[penalty] *= 10 
     return np.mean(error)
@@ -84,7 +82,6 @@ def loss_bb(params, df, high_idx, low_idx):
     upper = upper.fillna(method='bfill')
     lower = lower.fillna(method='bfill')
     
-    # Ambil index yang valid saja
     valid_h = [i for i in high_idx if i < len(df)]
     valid_l = [i for i in low_idx if i < len(df)]
     
@@ -110,7 +107,7 @@ def loss_macd(params, df):
     entries = df.loc[cross_up, 'Close']
     exits = df.loc[cross_down, 'Close']
     
-    if len(entries) == 0 or len(exits) == 0: return 0 # No trade = No profit/loss
+    if len(entries) == 0 or len(exits) == 0: return 0
     
     n = min(len(entries), len(exits))
     profits = (exits.values[:n] - entries.values[:n]) / entries.values[:n]
@@ -126,7 +123,6 @@ def loss_fibo(params, future_lows, orig_low, orig_high):
     targets = [guess_high - (diff * 0.618), guess_high - (diff * 0.5)]
     errors = []
     
-    # Vectorized calculation for speed
     for t in targets:
         dist = np.min(np.abs(future_lows - t))
         errors.append(dist)
@@ -141,7 +137,6 @@ def loss_stoch_rsi(params, df):
     gain = (delta.where(delta > 0, 0)).rolling(window=length).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=length).mean()
     
-    # Handle division by zero
     loss = loss.replace(0, 0.0001)
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
@@ -169,36 +164,30 @@ def loss_stoch_rsi(params, df):
 
 # --- HELPER: FIBO SCORE CALCULATOR ---
 def get_fibo_quality_score(df, high, low):
-    # Fungsi untuk menilai seberapa valid sebuah range Fibo
     if high <= low: return -1
     diff = high - low
     levels = [high - (diff * 0.618), high - (diff * 0.5), high - (diff * 0.382)]
     
     closes = df['Close'].values
     score = 0
-    tolerance = diff * 0.015 # Toleransi 1.5%
+    tolerance = diff * 0.015
     
-    # Cek setiap level, ada berapa candle yang closing-nya nempel area itu
     for lvl in levels:
-        # Hitung jumlah pantulan di level ini
         hits = np.sum(np.abs(closes - lvl) < tolerance)
         score += hits
         
-    # Normalize score by length (biar fair antara range pendek vs panjang)
-    # Kita cari "Kepadatan" pantulan (Density)
     density_score = score / len(df) if len(df) > 0 else 0
     return density_score
 
 # --- AI RUNNER (RANGE + ANCHOR OPTIMIZER) ---
 @st.cache_data(ttl=3600, show_spinner=False)
-def run_ai_optimizer(df_daily, df_4h):
-    # FALLBACK: Jika df_4h kosong/sedikit, gunakan df_daily untuk semua
-    use_4h_for_momentum = len(df_4h) > 200
-    df_momentum = df_4h if use_4h_for_momentum else df_daily
+def run_ai_optimizer(df_daily, df_momentum):
+    # Gunakan data momentum (1H/4H/1D) yang dipilih user untuk indikator cepat
+    df_mom = df_momentum
     
     # 1. SETUP TRAINING DATA (Momentum)
-    split_mom = int(len(df_momentum) * 0.8)
-    train_mom = df_momentum.iloc[:split_mom].copy()
+    split_mom = int(len(df_mom) * 0.8)
+    train_mom = df_mom.iloc[:split_mom].copy()
     
     # Pivot for BB/EMA logic
     high_idx = argrelextrema(train_mom['High'].values, np.greater, order=5)[0]
@@ -207,7 +196,6 @@ def run_ai_optimizer(df_daily, df_4h):
     results = {}
     
     # 2. OPTIMIZE MOMENTUM (EMA, BB, MACD, STOCH)
-    # (Bagian ini tidak berubah)
     try:
         res_ema = minimize(loss_ema, x0=[200], args=(train_mom, train_mom['Low'].iloc[low_idx], low_idx), method='Nelder-Mead', tol=1.0)
         results['EMA'] = int(res_ema.x[0])
@@ -228,33 +216,22 @@ def run_ai_optimizer(df_daily, df_4h):
         results['STOCH'] = (int(res_stoch.x[0]), int(res_stoch.x[1]), int(res_stoch.x[2]))
     except: results['STOCH'] = (14, 3, 3)
 
-    # 3. OPTIMIZE FIBO (RANGE + ANCHOR SELECTOR)
-    # ------------------------------------------
-    # Step A: Range Selection (Grid Search)
-    # Kita tes beberapa window candle: 30(1bln), 90(3bln), 180(6bln), 365(1thn)
+    # 3. OPTIMIZE FIBO (ALWAYS ON DAILY STRUCTURE)
     candidate_windows = [60, 90, 180, 250, 365]
-    best_window_data = df_daily.tail(250) # Default fallback
+    best_window_data = df_daily.tail(250)
     best_range_score = -1
     
     try:
         for w in candidate_windows:
             if len(df_daily) < w: continue
-            
-            # Ambil potongan data
             temp_df = df_daily.tail(w)
             temp_l = temp_df['Low'].min()
             temp_h = temp_df['High'].max()
-            
-            # Hitung skor kualitas (seberapa sering level fibo disentuh)
             score = get_fibo_quality_score(temp_df, temp_h, temp_l)
-            
-            # Logic: Jika score lebih tinggi, atau score mirip tapi range lebih panjang (prioritas struktur besar)
             if score > best_range_score:
                 best_range_score = score
                 best_window_data = temp_df
 
-        # Step B: Fine Tuning Anchor pada Range Terbaik (Minimize)
-        # Sekarang kita jalankan optimizer presisi di range yang sudah dipilih tadi
         mid = len(best_window_data) // 2
         orig_l = best_window_data['Low'].min()
         orig_h = best_window_data['High'].max()
@@ -264,10 +241,10 @@ def run_ai_optimizer(df_daily, df_4h):
         results['FIBO_ANCHORS'] = (res_fibo.x[0], res_fibo.x[1])
         
     except:
-        # Emergency Fallback
         results['FIBO_ANCHORS'] = (df_daily['Low'].min(), df_daily['High'].max())
     
     return results
+
 # ==========================================
 # 2. DATA PROCESSING
 # ==========================================
@@ -286,7 +263,6 @@ def process_data_indicators(df, params):
     df['BBL'] = df['SMA20'] - (df['STD20'] * std)
     df['BBM'] = df['SMA20']
     
-    # Handle NaN for Width calculation
     bbu = df['BBU'].fillna(method='bfill')
     bbl = df['BBL'].fillna(method='bfill')
     bbm = df['BBM'].fillna(method='bfill')
@@ -345,29 +321,27 @@ def calculate_fibonacci_levels(df, anchors):
     }
 
 # ==========================================
-# 3. SCORING ENGINE (MTF HYBRID)
+# 3. SCORING ENGINE (DYNAMIC TF)
 # ==========================================
 
-# --- SCORING ENGINE (DETAILED MATRIX VIEW) ---
-def calculate_mtf_quant_score(row_4h, prev_row_4h, price_curr, poc_daily, fibo_golden, opt_params):
+def calculate_mtf_quant_score(row_mom, prev_row_mom, price_curr, poc_daily, fibo_golden, opt_params):
     scores = {}
     details = {}
     bullish_flags = 0
 
-    # 1. EMA (Using 4H Trend)
-    ema_4h = row_4h['EMA200']
-    dist_pct = ((price_curr - ema_4h) / ema_4h) * 100
+    # 1. EMA (Using Momentum TF)
+    ema_val = row_mom['EMA200']
+    dist_pct = ((price_curr - ema_val) / ema_val) * 100
     if dist_pct >= 1.5: score_ema = 100 
     elif 0.5 <= dist_pct < 1.5: score_ema = 85
     elif -0.5 <= dist_pct < 0.5: score_ema = 55
     elif -1.5 <= dist_pct < -0.5: score_ema = 40
     else: score_ema = 30 
     scores['EMA'] = score_ema
-    # Detail: Show Price vs EMA Value
-    details['EMA'] = f"Price ${price_curr:.0f} vs EMA ${ema_4h:.0f} ({dist_pct:+.1f}%)"
+    details['EMA'] = f"Price ${price_curr:.0f} vs EMA ${ema_val:.0f} ({dist_pct:+.1f}%)"
     if score_ema >= 55: bullish_flags += 1
 
-    # 2. VPVR POC (Using DAILY Structure)
+    # 2. VPVR POC (Using DAILY Structure - Always)
     if price_curr > poc_daily: score_vpvr = 100 
     elif abs(price_curr - poc_daily)/poc_daily < 0.03: score_vpvr = 60 
     else: score_vpvr = 30 
@@ -376,45 +350,42 @@ def calculate_mtf_quant_score(row_4h, prev_row_4h, price_curr, poc_daily, fibo_g
     details['VPVR'] = f"{pos_txt} POC Daily (${poc_daily:.0f})"
     if score_vpvr >= 60: bullish_flags += 1
 
-    # 3. MACD (Detailed: Hist, Macd, Signal)
-    hist = row_4h['MACD_Hist']
-    macd_val = row_4h['MACD']
-    sig_val = row_4h['MACD_Signal']
-    prev_hist = prev_row_4h['MACD_Hist']
+    # 3. MACD (Using Momentum TF)
+    hist = row_mom['MACD_Hist']
+    macd_val = row_mom['MACD']
+    sig_val = row_mom['MACD_Signal']
+    prev_hist = prev_row_mom['MACD_Hist']
     
     if hist > 0 and hist > prev_hist: score_macd = 100
     elif hist > 0: score_macd = 70
     elif hist < 0 and hist > prev_hist: score_macd = 50
     else: score_macd = 30
     scores['MACD'] = score_macd
-    # Detail: Show Hist + Line + Signal
     details['MACD'] = f"Hist: {hist:+.1f} | M: {macd_val:.1f} | S: {sig_val:.1f}"
     if score_macd >= 70: bullish_flags += 1
 
-    # 4. Stoch RSI (Detailed: K & D)
-    k = row_4h['STOCHRSIk']
-    d = row_4h['STOCHRSId']
+    # 4. Stoch RSI (Using Momentum TF)
+    k = row_mom['STOCHRSIk']
+    d = row_mom['STOCHRSId']
     if k < 20 and k > d: score_stoch = 90
     elif k < 20: score_stoch = 65
     elif k > 80: score_stoch = 35
     else: score_stoch = 50
     scores['STOCH'] = score_stoch
-    # Detail: Show K & D
     status_stoch = "OB" if k > 80 else "OS" if k < 20 else "N"
     details['STOCH'] = f"K: {k:.1f} | D: {d:.1f} ({status_stoch})"
     if score_stoch >= 65: bullish_flags += 1
 
-    # 5. Bollinger (Using 4H Volatility)
-    if price_curr <= row_4h['BBL']: score_bb = 85
-    elif price_curr < row_4h['BBM']: score_bb = 65
-    elif price_curr < row_4h['BBU']: score_bb = 35
+    # 5. Bollinger (Using Momentum TF)
+    if price_curr <= row_mom['BBL']: score_bb = 85
+    elif price_curr < row_mom['BBM']: score_bb = 65
+    elif price_curr < row_mom['BBU']: score_bb = 35
     else: score_bb = 20
     scores['BB'] = score_bb
-    # Detail: Show Range
-    details['BB'] = f"Band: ${row_4h['BBL']:.0f} - ${row_4h['BBU']:.0f}"
+    details['BB'] = f"Band: ${row_mom['BBL']:.0f} - ${row_mom['BBU']:.0f}"
     if score_bb >= 65: bullish_flags += 1
 
-    # 6. Fibonacci (Using DAILY Structure)
+    # 6. Fibonacci (Using DAILY Structure - Always)
     dist_fibo_pct = abs((price_curr - fibo_golden) / fibo_golden) * 100
     if dist_fibo_pct <= 1.5: score_fibo = 90
     elif price_curr > fibo_golden: score_fibo = 55
@@ -431,57 +402,75 @@ def calculate_mtf_quant_score(row_4h, prev_row_4h, price_curr, poc_daily, fibo_g
     
     return final_score, scores, details, bullish_flags
 
-# --- DATA ENGINE (ROBUST & EXTENDED) ---
+# --- DATA ENGINE (DYNAMIC ASSET & TF) ---
 @st.cache_data(ttl=300, show_spinner=False)
-def get_data_engine():
-    # Retry mechanism
+def get_data_engine(ticker_symbol, momentum_tf_choice):
+    # Mapping pilihan user ke parameter yfinance
+    # Logic: 1H perlu raw hourly, 4H perlu raw hourly resampled, 1D perlu raw daily
+    
+    targets = [ticker_symbol, "IDR=X"]
+    
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            # Note: Fetch Hourly '1y' to ensure enough 4H candles for 200 EMA
-            df_full = yf.download(TICKERS, period="2y", interval="1d", group_by='ticker', progress=False)
-            df_hourly = yf.download(TICKERS, period="1y", interval="1h", group_by='ticker', progress=False)
+            # Download Daily (Selalu butuh ini untuk Struktur/Fibo)
+            df_daily = yf.download(targets, period="2y", interval="1d", group_by='ticker', progress=False)
             
-            if not df_full.empty and not df_hourly.empty:
+            # Download Hourly (Base untuk 1H dan 4H)
+            df_hourly = yf.download(targets, period="1y", interval="1h", group_by='ticker', progress=False)
+            
+            if not df_daily.empty:
                 break
         except Exception as e:
             if attempt == max_retries - 1:
-                return pd.DataFrame(), pd.DataFrame(), 16800, {}
+                return pd.DataFrame(), pd.DataFrame(), 16800
             time.sleep(1)
 
     try:
-        # Handling MultiIndex Columns cleanly
-        if isinstance(df_full.columns, pd.MultiIndex):
-            paxg_d = df_full['PAXG-USD'].dropna()
-            paxg_h = df_hourly['PAXG-USD'].dropna()
-            kurs = df_full['IDR=X']['Close'].iloc[-1]
-            if isinstance(kurs, pd.Series): kurs = kurs.iloc[0]
+        # Handling MultiIndex
+        asset_daily = pd.DataFrame()
+        asset_hourly = pd.DataFrame()
+        
+        # Ekstrak data aset
+        if isinstance(df_daily.columns, pd.MultiIndex):
+            if ticker_symbol in df_daily.columns.levels[0]:
+                asset_daily = df_daily[ticker_symbol].dropna()
+                asset_hourly = df_hourly[ticker_symbol].dropna() if not df_hourly.empty else pd.DataFrame()
+                kurs = df_daily['IDR=X']['Close'].iloc[-1]
+            else:
+                return pd.DataFrame(), pd.DataFrame(), 16800
         else:
-            return pd.DataFrame(), pd.DataFrame(), 16800, {}
+            return pd.DataFrame(), pd.DataFrame(), 16800
 
-        # Multiplier Correction
-        for df in [paxg_d, paxg_h]:
-            cols = ['Close', 'High', 'Low', 'Open']
-            df[cols] = df[cols] * PAXG_MULTIPLIER
+        if isinstance(kurs, pd.Series): kurs = kurs.iloc[0]
 
-        # PREPARE 4H DATA HERE FOR OPTIMIZER
-        # Resample Hourly to 4H
-        paxg_4h = paxg_h.resample('4h').agg({
-            'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'
-        }).dropna()
-
-        # AI Optimization Trigger (MTF Split)
-        # Train Fibo on Daily, Train Momentum on 4H
-        opt_data_d = paxg_d.tail(365).copy() # 1 Year Daily context
-        opt_data_4h = paxg_4h.tail(500).copy() # ~3 Months 4H context
+        # Multiplier Correction (Hanya untuk PAXG)
+        is_paxg = "PAXG" in ticker_symbol
+        multiplier = PAXG_MULTIPLIER if is_paxg else 1.0
         
-        # NOTE: run_ai_optimizer dipanggil di luar cache data agar UI bisa progress bar
-        # Tapi kita return raw dataframes
+        cols = ['Close', 'High', 'Low', 'Open']
+        for c in cols:
+            if c in asset_daily.columns: asset_daily[c] = asset_daily[c] * multiplier
+            if not asset_hourly.empty and c in asset_hourly.columns: asset_hourly[c] = asset_hourly[c] * multiplier
+
+        # PREPARE MOMENTUM DATA BASED ON USER CHOICE
+        df_momentum = pd.DataFrame()
         
-        return paxg_d, paxg_4h, float(kurs)
+        if momentum_tf_choice == "1H":
+            df_momentum = asset_hourly.tail(1000) # Raw hourly
+        elif momentum_tf_choice == "4H":
+            # Resample Hourly to 4H
+            df_momentum = asset_hourly.resample('4h').agg({
+                'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'
+            }).dropna().tail(500)
+        elif momentum_tf_choice == "1D":
+            # Use Daily as momentum too
+            df_momentum = asset_daily.tail(365)
+            
+        return asset_daily, df_momentum, float(kurs)
 
     except Exception as e:
-        return pd.DataFrame(), pd.DataFrame(), 16800, {}
+        return pd.DataFrame(), pd.DataFrame(), 16800
 
 def send_telegram_alert(token, chat_id, message):
     if not token or not chat_id: return False, "Token/ID Kosong"
@@ -494,37 +483,36 @@ def send_telegram_alert(token, chat_id, message):
     except Exception as e:
         return False, str(e)
 
-# --- REPORT GENERATOR (MTF LOGIC - FIXED) ---
-def generate_mtf_report(df_daily, df_4h, kurs, ai_params):
-    # Data 4H (Momentum)
-    last_4h = df_4h.iloc[-1]
-    prev_4h = df_4h.iloc[-2]
+# --- REPORT GENERATOR (DYNAMIC TF) ---
+def generate_mtf_report(df_daily, df_mom, kurs, ai_params, asset_name, tf_label):
+    # Data Momentum (Last Candle)
+    last_mom = df_mom.iloc[-1]
+    prev_mom = df_mom.iloc[-2]
     
-    # Data Daily (Structure)
-    last_d = df_daily.iloc[-1]
-    price = last_4h['Close'] # Use 4H Close for current price precision
+    # Data Price
+    price = last_mom['Close']
     
-    # Calculate Levels (Daily)
+    # Calculate Levels (Daily Structure - Always Fixed)
     fibo = calculate_fibonacci_levels(df_daily, ai_params['FIBO_ANCHORS']) 
-    poc = get_poc(df_daily.tail(180)) # POC based on 6mo daily volume
+    poc = get_poc(df_daily.tail(180)) 
     
-    # 1. QUANT SCORE (MTF)
+    # 1. QUANT SCORE
     final_score, scores, details, bullish_count = calculate_mtf_quant_score(
-        last_4h, prev_4h, price, poc, fibo['GOLDEN (0.618)'], ai_params
+        last_mom, prev_mom, price, poc, fibo['GOLDEN (0.618)'], ai_params
     )
     
-    # 2. MARKET REGIME (Based on 4H Trend)
-    ema_dist = ((price - last_4h['EMA200']) / last_4h['EMA200']) * 100
-    if ema_dist > 1.0: regime = "🐎 TRENDING BULLISH (4H)"
-    elif ema_dist < -1.0: regime = "🐻 TRENDING BEARISH (4H)"
-    else: regime = "🦀 RANGING / SIDEWAYS (4H)"
+    # 2. MARKET REGIME (Based on Selected TF)
+    ema_dist = ((price - last_mom['EMA200']) / last_mom['EMA200']) * 100
+    if ema_dist > 1.0: regime = f"🐎 TRENDING BULLISH ({tf_label})"
+    elif ema_dist < -1.0: regime = f"🐻 TRENDING BEARISH ({tf_label})"
+    else: regime = f"🦀 RANGING / SIDEWAYS ({tf_label})"
     
-    bb_width = last_4h.get('BB_Width', 0.1)
+    bb_width = last_mom.get('BB_Width', 0.1)
     is_high_vol = bb_width > 0.15
     vol_status = "⚡ HIGH VOLATILITY" if is_high_vol else "🌊 NORMAL/LOW VOL"
     
-    # Direction Flag (MACD 4H Acceleration)
-    macd_accel = last_4h['MACD_Hist'] - prev_4h['MACD_Hist']
+    # Direction Flag (MACD Accel)
+    macd_accel = last_mom['MACD_Hist'] - prev_mom['MACD_Hist']
     if macd_accel > 0: dir_flag = "↗️ UP"
     elif macd_accel < 0: dir_flag = "↘️ DOWN"
     else: dir_flag = "➡️ FLAT"
@@ -533,7 +521,7 @@ def generate_mtf_report(df_daily, df_4h, kurs, ai_params):
     action_type = "BUY"
     sell_reason = ""
     sell_pct = 0
-    momentum_decay = last_4h['MACD_Hist'] < prev_4h['MACD_Hist'] and last_4h['MACD_Hist'] > 0
+    momentum_decay = last_mom['MACD_Hist'] < prev_mom['MACD_Hist'] and last_mom['MACD_Hist'] > 0
     
     if final_score < 40: 
         action_type = "SELL"
@@ -545,14 +533,14 @@ def generate_mtf_report(df_daily, df_4h, kurs, ai_params):
         sell_pct = 50
     elif price >= fibo['RESISTANCE (High)'] and momentum_decay:
         action_type = "SELL"
-        sell_reason = "Daily Res + 4H Mom Decay"
+        sell_reason = f"Daily Res + {tf_label} Mom Decay"
         sell_pct = 30
-    elif price >= fibo['0.236'] and last_4h['STOCHRSIk'] > 80:
+    elif price >= fibo['0.236'] and last_mom['STOCHRSIk'] > 80:
         action_type = "SELL"
         sell_reason = "Overbought at Resistance"
         sell_pct = 20
 
-    # 4. BUY LOGIC & SIZING (FIXED HERE)
+    # 4. BUY LOGIC & SIZING
     dana_market = 0
     dana_limit = 0
     decision_title = "" 
@@ -584,10 +572,9 @@ def generate_mtf_report(df_daily, df_4h, kurs, ai_params):
         dana_market = MODAL_GAJI * alloc_market
         dana_limit = MODAL_GAJI * alloc_limit
         
-    else: # === INI YANG DITAMBAHKAN ===
-        # Jika Action Type == SELL, kita isi title-nya
+    else:
         decision_title = "🚨 SELL / TAKE PROFIT"
-        prob_desc = sell_reason # Alasan sell masuk ke logic description
+        prob_desc = sell_reason
 
     # 5. SMART LIMIT (Uses DAILY Support for better safety)
     ema_daily_val = df_daily['Close'].ewm(span=ai_params['EMA'], adjust=False).mean().iloc[-1]
@@ -634,16 +621,16 @@ def generate_mtf_report(df_daily, df_4h, kurs, ai_params):
    👉 Est. IDR: {fmt_idr(est_limit_idr)}
         """
 
-    report = f"""🦅 GOLD MASTER V6 (MTF EDITION)
+    report = f"""🦅 {asset_name} MASTER V7 (MTF)
 📅 {now.strftime('%d %b %Y | %H:%M WIB')}
 =======================================
 
-💰 **MARKET DATA (4H/Daily Hybrid)**
-PAXG : {fmt_usd(price)}
-EMA  : {fmt_usd(last_4h['EMA200'])} (4H Trend)
+💰 **MARKET DATA ({tf_label}/Daily Hybrid)**
+PRICE: {fmt_usd(price)}
+EMA  : {fmt_usd(last_mom['EMA200'])} ({tf_label} Trend)
 VOL  : {vol_status}
 
-📊 **MATRIX 6 INDIKATOR (MTF)**
+📊 **MATRIX 6 INDIKATOR ({tf_label})**
 1. EMA        [{scores['EMA']}] {details['EMA']}
 2. VPVR POC   [{scores['VPVR']}] {details['VPVR']}
 3. MACD       [{scores['MACD']}] {details['MACD']}
@@ -670,40 +657,55 @@ VOL  : {vol_status}
     return report, df_daily, fibo, final_score
 
 # --- MAIN APP ---
-st.title("Gold Master V6 (MTF Institutional)")
+st.title("🦅 Crypto Master V7 (Multi-Asset Institutional)")
+
+# --- USER SELECTION (SIDEBAR) ---
+st.sidebar.header("⚙️ Konfigurasi Aset & TF")
+asset_choice = st.sidebar.selectbox("Pilih Aset:", ["PAXG (Gold)", "BTC (Bitcoin)"])
+tf_choice = st.sidebar.selectbox("Timeframe Momentum:", ["1H", "4H", "1D"])
+
+# Map selection to Ticker & value
+ticker_map = {"PAXG (Gold)": "PAXG-USD", "BTC (Bitcoin)": "BTC-USD"}
+selected_ticker = ticker_map[asset_choice]
 
 # --- STATUS BAR (PRO UI) ---
-with st.status("🦅 AI MTF Brain Initialization...", expanded=True) as status:
-    st.write("📡 Fetching Multi-Timeframe Data (Daily & Hourly)...")
-    paxg_d_raw, paxg_4h_raw, kurs_val = get_data_engine()
+with st.status(f"🦅 Menganalisa {asset_choice} pada TF {tf_choice}...", expanded=True) as status:
+    st.write(f"📡 Fetching Data ({selected_ticker})...")
+    df_d_raw, df_mom_raw, kurs_val = get_data_engine(selected_ticker, tf_choice)
     
-    if paxg_d_raw.empty or paxg_4h_raw.empty:
+    if df_d_raw.empty or df_mom_raw.empty:
         status.update(label="❌ Data Error", state="error")
-        st.error("Gagal mengambil data. Cek koneksi internet / Yahoo API.")
+        st.error(f"Gagal mengambil data {selected_ticker}. Cek koneksi / Yahoo API.")
         st.stop()
     
-    st.write("🧠 Training AI Model on Split Timeframes...")
+    st.write(f"🧠 Training AI Model pada data {tf_choice}...")
     # PASS BOTH DATAFRAMES TO OPTIMIZER
-    ai_params = run_ai_optimizer(paxg_d_raw, paxg_4h_raw)
+    ai_params = run_ai_optimizer(df_d_raw, df_mom_raw)
     
-    st.write("⚙️ Applying Optimized Parameters to Contexts...")
+    st.write("⚙️ Applying Indicators...")
     # Process separately
-    paxg_d = process_data_indicators(paxg_d_raw, ai_params) # For Fibo context mainly
-    paxg_4h = process_data_indicators(paxg_4h_raw, ai_params) # For Momentum
+    df_d = process_data_indicators(df_d_raw, ai_params) # For Fibo/Structure
+    df_mom = process_data_indicators(df_mom_raw, ai_params) # For Momentum
     
     status.update(label="✅ AI Ready!", state="complete", expanded=False)
 
 # --- REPORT GENERATION ---
 # Use MTF Generator
-final_report, xau_daily, fib_levels, score_val = generate_mtf_report(paxg_d, paxg_4h, kurs_val, ai_params)
+final_report, chart_daily, fib_levels, score_val = generate_mtf_report(
+    df_d, df_mom, kurs_val, ai_params, asset_choice.split()[0], tf_choice
+)
 
-# --- SIDEBAR ---
-st.sidebar.header("⚙️ AI MTF Parameters")
-st.sidebar.info(f"4H EMA Period: {ai_params['EMA']}")
-st.sidebar.info(f"4H BB: Win {ai_params['BB'][0]} | Std {ai_params['BB'][1]:.2f}")
-st.sidebar.info(f"4H MACD: {ai_params['MACD']}")
-st.sidebar.info(f"Daily Fibo Anchors: {fmt_usd(ai_params['FIBO_ANCHORS'][0])}-{fmt_usd(ai_params['FIBO_ANCHORS'][1])}")
+# --- SIDEBAR INFO ---
+st.sidebar.markdown("---")
+st.sidebar.info(f"AI {tf_choice} EMA: {ai_params['EMA']}")
+st.sidebar.info(f"AI {tf_choice} BB: {ai_params['BB']}")
+st.sidebar.info(f"Daily Anchors: {fmt_usd(ai_params['FIBO_ANCHORS'][0])} - {fmt_usd(ai_params['FIBO_ANCHORS'][1])}")
 
+score_color = "normal" if score_val >= 65 else "inverse"
+st.sidebar.metric(f"SCORE ({tf_choice})", f"{score_val:.1f}", delta="Strength", delta_color=score_color)
+st.sidebar.metric("PRICE (Realtime)", fmt_usd(df_mom.iloc[-1]['Close']))
+
+# --- TELEGRAM CONFIG ---
 st.sidebar.header("⚙️ Telegram")
 if "TELEGRAM_TOKEN" in st.secrets:
     bot_token = st.secrets["TELEGRAM_TOKEN"]
@@ -712,22 +714,16 @@ else:
     bot_token = st.sidebar.text_input("Bot Token", type="password")
     chat_id = st.sidebar.text_input("Chat ID")
 
-st.sidebar.markdown("---")
-score_color = "normal" if score_val >= 65 else "inverse"
-st.sidebar.metric("QUANT SCORE (MTF)", f"{score_val:.1f}", delta="Strength", delta_color=score_color)
-st.sidebar.metric("PRICE (Realtime)", fmt_usd(paxg_4h.iloc[-1]['Close']))
-
-# --- CHART (Using Daily for Structure View, but could switch) ---
-st.subheader("Structural View (Daily Context + Key Levels)")
-# Plotting Daily candles for clearer structure view
-fig = go.Figure(data=[go.Candlestick(x=xau_daily.index,
-                                open=xau_daily['Open'], high=xau_daily['High'],
-                                low=xau_daily['Low'], close=xau_daily['Close'],
-                                name='PAXG/USD')])
+# --- CHART (Visualizing Structure) ---
+st.subheader(f"Structural View (Daily Context + Key Levels)")
+fig = go.Figure(data=[go.Candlestick(x=chart_daily.index,
+                                open=chart_daily['Open'], high=chart_daily['High'],
+                                low=chart_daily['Low'], close=chart_daily['Close'],
+                                name=asset_choice)])
 
 # EMA (Daily Reference for Chart)
-ema_d_val = xau_daily['Close'].ewm(span=ai_params['EMA'], adjust=False).mean()
-fig.add_trace(go.Scatter(x=xau_daily.index, y=ema_d_val, line=dict(color='blue', width=2), name=f'EMA {ai_params["EMA"]} (Daily)'))
+ema_d_val = chart_daily['Close'].ewm(span=ai_params['EMA'], adjust=False).mean()
+fig.add_trace(go.Scatter(x=chart_daily.index, y=ema_d_val, line=dict(color='blue', width=2), name=f'EMA {ai_params["EMA"]} (Daily)'))
 
 # Fibo
 colors_fib = {"MOONBAG": "lime", "RESISTANCE": "red", "GOLDEN": "gold", "FLOOR": "white", "MID": "gray"}
@@ -750,13 +746,5 @@ with col1:
             if success: st.success("Sent!")
             else: st.error(f"Failed: {msg}")
 
-# Render Text Report in Code Block (Better CSS)
+# Render Text Report
 st.code(final_report, language="yaml")
-
-
-
-
-
-
-
-
